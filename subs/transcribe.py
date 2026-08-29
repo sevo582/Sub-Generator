@@ -176,6 +176,16 @@ def _align(audio_path: Path, transcript: Transcript, options: TranscribeOptions)
         )
         return
 
+    try:
+        import whisperx  # noqa: F401
+    except ImportError:
+        transcript.notes.append(
+            "whisperx не е инсталиран — таймингите са от faster-whisper и са "
+            "по-неточни. Инсталирай с: pip install -e \".[transcribe]\" "
+            "(изисква Python 3.10–3.13; на 3.14 whisperx още не се поддържа)."
+        )
+        return
+
     device, _ = resolve_device(options.device)
     for index, candidate in enumerate(candidates):
         try:

@@ -266,3 +266,22 @@ def _touch(tmp_path):
     path = tmp_path / "video.mp4"
     path.write_bytes(b"")
     return path
+
+
+def test_missing_whisperx_is_explained_not_swallowed(monkeypatch, tmp_path):
+    """На Python 3.14 whisperx не се инсталира. Бележката трябва да казва
+    защо таймингите са по-груби, а не да мълчи или да гърми."""
+    monkeypatch.setitem(sys.modules, "whisperx", None)
+    data = _transcript()
+    tr._align(tmp_path / "a.wav", data, tr.TranscribeOptions(device="cpu"))
+    assert not data.aligned
+    assert any("whisperx не е инсталиран" in note for note in data.notes)
+    assert any("3.14" in note for note in data.notes)
+
+
+def test_missing_whisperx_keeps_the_original_words(monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "whisperx", None)
+    data = _transcript()
+    before = [(w.text, w.start, w.end) for w in data.words]
+    tr._align(tmp_path / "a.wav", data, tr.TranscribeOptions(device="cpu"))
+    assert [(w.text, w.start, w.end) for w in data.words] == before

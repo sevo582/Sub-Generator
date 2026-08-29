@@ -16,9 +16,14 @@ dependencies = [
 
 [project.optional-dependencies]
 # Транскрипцията тегли torch и е тежка — затова е отделно.
+#
+# whisperx декларира requires_python <3.14. Без ограничението тук pip
+# връща назад до древна версия с ковък пин на ctranslate2 и цялата
+# инсталация гърми. С него на Python 3.14 се инсталира само
+# faster-whisper: инструментът работи, но без forced alignment и го казва.
 transcribe = [
     "faster-whisper>=1.0",
-    "whisperx>=3.1",
+    "whisperx>=3.8; python_version < '3.14'",
 ]
 # Избор на подчертана дума през езиков модел (v2, зад флаг).
 llm = ["anthropic>=0.40"]
