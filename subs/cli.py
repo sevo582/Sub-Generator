@@ -297,10 +297,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        check_tools()
+        # ffmpeg се проверява в командите, които наистина пипат видео.
+        # ``styles`` само изброява пресети и трябва да работи и на машина,
+        # на която ffmpeg още не е инсталиран — иначе първото нещо, с което
+        # човек проверява дали пакетът изобщо е тръгнал, гърми без причина.
         if args.command == "render":
+            check_tools()
             return command_render(args)
         if args.command == "transcribe":
+            check_tools()
             return command_transcribe(args)
         if args.command == "styles":
             return command_styles(args)
