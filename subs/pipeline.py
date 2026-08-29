@@ -18,8 +18,13 @@ from .textmetrics import measurer
 
 
 def load_words(path: str | Path) -> Transcript:
-    """Чете междинния JSON. Приема и обект с ``words``, и гол списък."""
-    with open(path, "r", encoding="utf-8") as handle:
+    """Чете междинния JSON. Приема и обект с ``words``, и гол списък.
+
+    Кодировката е ``utf-8-sig``, а не ``utf-8``, нарочно: Notepad на Windows
+    записва UTF-8 с BOM, а този файл е направен да се редактира на ръка.
+    ``utf-8-sig`` чете и с, и без BOM; ``utf-8`` гърми при наличие на такъв.
+    """
+    with open(path, "r", encoding="utf-8-sig") as handle:
         return Transcript.from_json(json.load(handle))
 
 

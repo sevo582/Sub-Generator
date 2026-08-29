@@ -254,7 +254,9 @@ def load_style_file(path: str) -> Style:
         {"extends": "stack", "name": "stack-cyan",
          "stack": {"accent_all_highlights": true}}
     """
-    with open(path, "r", encoding="utf-8") as handle:
+    # utf-8-sig заради BOM-а, който Notepad на Windows слага — виж
+    # бележката при ``pipeline.load_words``.
+    with open(path, "r", encoding="utf-8-sig") as handle:
         data = json.load(handle)
     parent = data.pop("extends", None)
     if parent is None:
