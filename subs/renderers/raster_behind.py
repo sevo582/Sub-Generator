@@ -246,8 +246,20 @@ class RasterBehindRenderer(Renderer):
                 else:
                     source_png = temp / f"src-{time:.3f}.png"
                     extract_frame(request.source, time, source_png)
-                    frame = Image.alpha_composite(
-                        Image.open(source_png).convert("RGBA"), overlay)
+                    background = Image.open(source_png).convert("RGBA")
+                    if background.size != overlay.size:
+                        # Стига се дотук само ако ffprobe и ffmpeg се
+                        # разминават за размера — най-често при завъртян
+                        # материал. Казваме го, вместо PIL да изсипе
+                        # "images do not match".
+                        raise ValueError(
+                            f"кадърът от видеото е {background.size[0]}x"
+                            f"{background.size[1]}, а слоят "
+                            f"{overlay.size[0]}x{overlay.size[1]}. "
+                            "Ако видеото е завъртяно, това е бъг в subs — "
+                            "прати изхода на: ffprobe -show_streams видео"
+                        )
+                    frame = Image.alpha_composite(background, overlay)
 
                 destination = preview_path(request, time)
                 ensure_parent(destination)

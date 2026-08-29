@@ -205,7 +205,12 @@ def command_render(args: argparse.Namespace) -> int:
     say = (lambda message: None) if args.quiet else print
 
     media = probe(args.video)
-    say(f"вход: {media.width}x{media.height} @ {media.fps:.2f} к/с, {media.duration:.2f} s")
+    turned = f", завъртяно на {media.rotation}°" if media.rotation else ""
+    say(f"вход: {media.width}x{media.height} @ {media.fps:.2f} к/с, "
+        f"{media.duration:.2f} s{turned}")
+    if media.width > media.height:
+        warn("видеото е хоризонтално, а стиловете са мерени за вертикално "
+             "— размерите се смятат от височината и текстът ще излезе едър")
 
     if args.words:
         transcript = load_words(args.words)

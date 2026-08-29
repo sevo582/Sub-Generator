@@ -38,6 +38,9 @@ class MediaInfo:
     fps: float
     duration: float
     has_audio: bool
+    #: Завъртане от метаданните, в градуси. Размерите по-горе са вече
+    #: разменени, ако е ±90 — държим го само за да го покажем на човека.
+    rotation: int = 0
 
     @property
     def frame_count(self) -> int:
@@ -57,8 +60,37 @@ def check_tools() -> None:
         )
 
 
+def stream_rotation(stream: dict) -> int:
+    """Завъртането от метаданните на потока, в градуси 0/90/180/270.
+
+    Видео, снимано вертикално с телефон, често се записва легнало плюс флаг
+    за завъртане. ffprobe връща **записаните** размери, а ffmpeg подава на
+    филтрите кадъра **след** завъртането — разминаване, което обърква всяка
+    сметка за позиции.
+
+    Стойността се търси на двете места, където живее: матрицата на дисплея
+    в ``side_data_list`` (модерният начин) и остарелия таг ``rotate``.
+    """
+    value = None
+    for side_data in stream.get("side_data_list", []):
+        if "rotation" in side_data:
+            value = side_data["rotation"]
+            break
+    if value is None:
+        value = stream.get("tags", {}).get("rotate")
+    try:
+        degrees = int(round(float(value)))
+    except (TypeError, ValueError):
+        return 0
+    return degrees % 360
+
+
 def probe(path: str | os.PathLike[str]) -> MediaInfo:
-    """Чете размери, кадрова честота и наличие на звук."""
+    """Чете размери, кадрова честота и наличие на звук.
+
+    Размерите са тези, които наистина излизат от ffmpeg — при завъртян
+    материал са разменени спрямо записаните.
+    """
     check_tools()
     command = [
         "ffprobe", "-v", "error", "-print_format", "json",
@@ -93,12 +125,18 @@ def probe(path: str | os.PathLike[str]) -> MediaInfo:
     if duration <= 0 and video.get("nb_frames"):
         duration = float(video["nb_frames"]) / fps
 
+    width, height = int(video["width"]), int(video["height"])
+    rotation = stream_rotation(video)
+    if rotation in (90, 270):
+        width, height = height, width
+
     return MediaInfo(
-        width=int(video["width"]),
-        height=int(video["height"]),
+        width=width,
+        height=height,
         fps=fps,
         duration=duration,
         has_audio=has_audio,
+        rotation=rotation,
     )
 
 
