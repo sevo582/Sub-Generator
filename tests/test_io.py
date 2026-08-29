@@ -107,3 +107,57 @@ def test_overrides_do_not_touch_the_preset(tmp_path):
     before = get_style("stack").stack.size_normal
     get_style("stack", {"stack": {"size_normal": 0.09}})
     assert get_style("stack").stack.size_normal == before
+
+
+# --------------------------------------------------------------------------
+# Кодировки, писани от Windows
+# --------------------------------------------------------------------------
+
+
+def test_windows_codepage_is_read_with_a_warning(tmp_path, monkeypatch):
+    """``Set-Content`` в Windows PowerShell 5.1 записва в таблицата на
+    системата, не в UTF-8. На български Windows това е cp1251."""
+    import subs.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline.locale, "getpreferredencoding", lambda x=True: "cp1251")
+    path = tmp_path / "w.json"
+    path.write_bytes(json.dumps(CYRILLIC, ensure_ascii=False).encode("cp1251"))
+
+    result = load_words(path)
+    assert [w.text for w in result.words] == ["Тази", "програма"]
+    assert any("cp1251" in note for note in result.notes)
+    assert any("Set-Content" in note for note in result.notes)
+
+
+def test_undecodable_file_says_how_to_fix_it(tmp_path, monkeypatch):
+    import subs.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline.locale, "getpreferredencoding", lambda x=True: "ascii")
+    path = tmp_path / "w.json"
+    path.write_bytes(json.dumps(CYRILLIC, ensure_ascii=False).encode("cp1251"))
+
+    with pytest.raises(ValueError, match="UTF8"):
+        load_words(path)
+
+
+def test_plain_utf8_produces_no_encoding_warning(tmp_path):
+    path = tmp_path / "w.json"
+    write(path, CYRILLIC)
+    assert load_words(path).notes == []
+
+
+def test_broken_json_names_the_file_and_the_position(tmp_path):
+    path = tmp_path / "w.json"
+    path.write_text('{"words": [{"text": "тест",}]}', encoding="utf-8")
+    with pytest.raises(ValueError, match="не е валиден JSON"):
+        load_words(path)
+
+
+def test_style_file_in_windows_codepage_is_read(tmp_path, monkeypatch):
+    import subs.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline.locale, "getpreferredencoding", lambda x=True: "cp1251")
+    path = tmp_path / "s.json"
+    path.write_bytes(json.dumps(
+        {"extends": "stack", "name": "мой стил"}, ensure_ascii=False).encode("cp1251"))
+    assert load_style_file(str(path)).name == "мой стил"

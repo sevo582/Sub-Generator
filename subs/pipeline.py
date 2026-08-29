@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import locale
 from pathlib import Path
 from typing import Callable
 
@@ -17,15 +18,54 @@ from .styles import Style
 from .textmetrics import measurer
 
 
-def load_words(path: str | Path) -> Transcript:
-    """Чете междинния JSON. Приема и обект с ``words``, и гол списък.
+def read_text(path: str | Path) -> tuple[str, str | None]:
+    """Чете текстов файл, писан на Windows, и връща (съдържание, бележка).
 
-    Кодировката е ``utf-8-sig``, а не ``utf-8``, нарочно: Notepad на Windows
-    записва UTF-8 с BOM, а този файл е направен да се редактира на ръка.
-    ``utf-8-sig`` чете и с, и без BOM; ``utf-8`` гърми при наличие на такъв.
+    Този файл е направен да се редактира на ръка, при това предимно на
+    Windows, където има два капана:
+
+    * Notepad записва UTF-8 **с BOM**. ``utf-8`` гърми на първия знак,
+      ``utf-8-sig`` чете и с, и без.
+    * ``Set-Content`` в Windows PowerShell 5.1 записва в кодовата таблица
+      на системата (на български Windows това е cp1251), а не в UTF-8.
+
+    Затова се пробва UTF-8, а при неуспех — таблицата на системата. Вторият
+    случай връща бележка, а не мълчи: разчитането с чужда таблица е
+    предположение и потребителят трябва да го знае.
     """
-    with open(path, "r", encoding="utf-8-sig") as handle:
-        return Transcript.from_json(json.load(handle))
+    data = Path(path).read_bytes()
+    try:
+        return data.decode("utf-8-sig"), None
+    except UnicodeDecodeError:
+        pass
+
+    fallback = locale.getpreferredencoding(False)
+    try:
+        text = data.decode(fallback)
+    except (UnicodeDecodeError, LookupError):
+        raise ValueError(
+            f"{path} не е в UTF-8 и не се чете и с {fallback}. "
+            "Запиши го наново като UTF-8. В PowerShell:\n"
+            "    Get-Content файл.json | Set-Content нов.json -Encoding UTF8"
+        ) from None
+    return text, (
+        f"{Path(path).name} не е в UTF-8; прочетен е с {fallback}. "
+        "Провери, че буквите са верни, и го запиши наново с "
+        "Set-Content -Encoding UTF8."
+    )
+
+
+def load_words(path: str | Path) -> Transcript:
+    """Чете междинния JSON. Приема и обект с ``words``, и гол списък."""
+    text, note = read_text(path)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{path} не е валиден JSON: {error}") from None
+    transcript = Transcript.from_json(data)
+    if note:
+        transcript.notes.append(note)
+    return transcript
 
 
 def save_words(transcript: Transcript, path: str | Path) -> None:
