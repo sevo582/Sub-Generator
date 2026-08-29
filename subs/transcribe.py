@@ -116,23 +116,36 @@ def _recognise(audio_path: Path, options: TranscribeOptions) -> Transcript:
 
     device, compute = resolve_device(options.device)
     compute = options.compute_type or compute
-    model = WhisperModel(options.model, device=device, compute_type=compute)
 
-    segments, info = model.transcribe(
-        str(audio_path),
-        language=options.language,
-        word_timestamps=True,
-        vad_filter=True,
-        beam_size=5,
-        initial_prompt=options.initial_prompt,
-    )
+    try:
+        model = WhisperModel(options.model, device=device, compute_type=compute)
+    except Exception as error:  # noqa: BLE001 — най-често мрежа или диск
+        raise RuntimeError(
+            f"моделът {options.model!r} не можа да се зареди: {error}\n"
+            "При първо пускане се тегли от HuggingFace и се кешира в "
+            "~/.cache/huggingface (Windows: %USERPROFILE%\\.cache\\huggingface).\n"
+            "Провери мрежата, или пробвай по-малък модел с --model small."
+        ) from error
 
-    words: list[Word] = []
-    for segment in segments:
-        for word in (segment.words or []):
-            text = word.word.strip()
-            if text:
-                words.append(Word(text=text, start=float(word.start), end=float(word.end)))
+    try:
+        segments, info = model.transcribe(
+            str(audio_path),
+            language=options.language,
+            word_timestamps=True,
+            vad_filter=True,
+            beam_size=5,
+            initial_prompt=options.initial_prompt,
+        )
+
+        words: list[Word] = []
+        for segment in segments:  # генератор — работата се случва тук
+            for word in (segment.words or []):
+                text = word.word.strip()
+                if text:
+                    words.append(Word(text=text, start=float(word.start),
+                                      end=float(word.end)))
+    except Exception as error:  # noqa: BLE001
+        raise RuntimeError(f"разпознаването се провали: {error}") from error
 
     language = options.language or getattr(info, "language", None) or "unknown"
     notes = [f"faster-whisper {options.model} на {device}/{compute}"]

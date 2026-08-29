@@ -155,6 +155,45 @@ def burn_ass(
     return command
 
 
+def preview_ass_frame(
+    source: str | os.PathLike[str],
+    ass_dir: str | os.PathLike[str],
+    ass_name: str,
+    fonts_subdir: str,
+    time: float,
+    output: str | os.PathLike[str],
+) -> list[str]:
+    """Един кадър с вградени субтитри, за преглед на вида.
+
+    ``-copyts`` е задължително: при бързо превъртане с ``-ss`` преди ``-i``
+    ffmpeg нулира времената, филтърът ``ass`` вижда кадъра като нулева
+    секунда и рисува грешния блок — или никакъв.
+
+    ``-update 1`` позволява един-единствен PNG вместо поредица.
+    """
+    command = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", f"{max(0.0, time):.3f}", "-copyts",
+        "-i", os.path.abspath(str(source)),
+        "-vf", f"ass=f={ass_name}:fontsdir={fonts_subdir}",
+        "-frames:v", "1", "-update", "1",
+        os.path.abspath(str(output)),
+    ]
+    run(command, cwd=str(ass_dir))
+    return command
+
+
+def extract_frame(source: str | os.PathLike[str], time: float,
+                  output: str | os.PathLike[str]) -> None:
+    """Изнася един кадър от изходното видео като PNG."""
+    check_tools()
+    run([
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", f"{max(0.0, time):.3f}", "-i", os.path.abspath(str(source)),
+        "-frames:v", "1", "-update", "1", os.path.abspath(str(output)),
+    ])
+
+
 # --------------------------------------------------------------------------
 # Стил B: растерни кадри през pipe
 # --------------------------------------------------------------------------

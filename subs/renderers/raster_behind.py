@@ -19,17 +19,20 @@ ASS отпада тук по три причини, всяка от които �
 
 from __future__ import annotations
 
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Iterator
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from ..burn import (LAYER_SUFFIX, MediaInfo, build_raster_command, ensure_parent,
-                    pipe_frames, verify_alpha)
+                    extract_frame, pipe_frames, verify_alpha)
 from ..layout import deoverlap, layout_behind
 from ..models import BlockLayout, Placed
 from ..styles import BehindStyle, ShadowSpec
 from ..textmetrics import font_path
-from .base import RenderRequest, RenderResult, Renderer, register
+from .base import RenderRequest, RenderResult, Renderer, preview_path, register
 
 #: Запас около мастилото, за да има място размазването на сянката.
 PAD = 8
@@ -212,6 +215,47 @@ class RasterBehindRenderer(Renderer):
         for index in range(media.frame_count):
             frame = self._draw_frame(index / media.fps, layouts, sprites, style, media)
             yield blank if frame is None else frame.tobytes()
+
+    # ------------------------------------------------------------------
+    # Преглед на един кадър
+    # ------------------------------------------------------------------
+
+    def preview(self, request: RenderRequest, layouts: list[BlockLayout]) -> RenderResult:
+        """Един кадър, съставен по същата сметка както при пълния рендер.
+
+        Наслагването върху кадъра се прави тук с Pillow, а не с ffmpeg —
+        и двете са обикновено „over" смесване, така че резултатът е същият,
+        но без да пускаме кодек за един-единствен PNG.
+        """
+        style = request.style.behind
+        media = request.media
+        sprites = self._sprites(layouts, style)
+        result = RenderResult(layouts=layouts)
+        layer_only = request.output is None
+
+        temp = Path(tempfile.mkdtemp(prefix="subs-preview-"))
+        try:
+            for time in request.preview_times:
+                overlay = self._draw_frame(time, layouts, sprites, style, media)
+                if overlay is None:
+                    overlay = Image.new("RGBA", (media.width, media.height), (0, 0, 0, 0))
+                    result.notes.append(f"на {time:.2f} s няма текст на екрана")
+
+                if layer_only:
+                    frame = overlay
+                else:
+                    source_png = temp / f"src-{time:.3f}.png"
+                    extract_frame(request.source, time, source_png)
+                    frame = Image.alpha_composite(
+                        Image.open(source_png).convert("RGBA"), overlay)
+
+                destination = preview_path(request, time)
+                ensure_parent(destination)
+                frame.save(destination)
+                result.outputs.append(destination)
+        finally:
+            shutil.rmtree(temp, ignore_errors=True)
+        return result
 
     # ------------------------------------------------------------------
     # Рендиране

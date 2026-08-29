@@ -62,6 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=__doc__,
     )
     parser.add_argument("--version", action="version", version=f"subs {__version__}")
+    parser.add_argument("--traceback", action="store_true",
+                        help="показва пълния traceback при грешка (за докладване на бъг)")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # ---- render ----
@@ -93,6 +95,13 @@ def build_parser() -> argparse.ArgumentParser:
     render_parser.add_argument("--keep-intermediate", type=Path, default=None,
                                metavar="ПАПКА",
                                help="запазва .ass и другите междинни файлове")
+    render_parser.add_argument("--preview", type=float, action="append", default=[],
+                               metavar="СЕКУНДА", dest="preview_times",
+                               help="рисува само по един PNG кадър в дадената секунда "
+                                    "вместо цялото видео; може да се повтаря")
+    render_parser.add_argument("--preview-dir", type=Path, default=None,
+                               help="къде да отидат кадрите от --preview "
+                                    "(по подразбиране: до изходното видео)")
     render_parser.add_argument("--llm-highlight", action="store_true",
                                help="подчертаната дума се избира от езиков модел "
                                     "вместо с евристиката (изисква ANTHROPIC_API_KEY)")
@@ -222,6 +231,11 @@ def command_render(args: argparse.Namespace) -> int:
 
     layer_only = args.layer_only
     output = None if layer_only else (args.output or _default_output(args.video, style))
+    if args.preview_times:
+        bad = [t for t in args.preview_times if not 0 <= t <= media.duration]
+        if bad:
+            raise ValueError(
+                f"моментите {bad} са извън видеото (0–{media.duration:.2f} s)")
     layer = args.layer
     if layer is None and layer_only:
         layer = args.video.with_suffix("").with_name(
@@ -256,6 +270,7 @@ def command_render(args: argparse.Namespace) -> int:
         layer_format=args.layer_format, crf=args.crf, preset=args.preset,
         keep_dir=args.keep_intermediate, dry_run=args.dry_run,
         progress=say, media=media, blocks=blocks,
+        preview_times=args.preview_times, preview_dir=args.preview_dir,
     )
 
     for note in result.notes:
@@ -297,6 +312,12 @@ def main(argv: list[str] | None = None) -> int:
         return fail(str(error))
     except KeyboardInterrupt:
         return fail("прекъснато")
+    except Exception as error:  # noqa: BLE001
+        # Суровият traceback не помага на никого. Пълният остава зад флаг —
+        # най-честите причини (недостъпен модел, пълен диск) нямат нужда от него.
+        if args.traceback:
+            raise
+        return fail(f"{error}\n({type(error).__name__} — за подробности: --traceback)")
     return fail(f"непозната команда: {args.command}")
 
 

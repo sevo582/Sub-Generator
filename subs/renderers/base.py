@@ -33,6 +33,10 @@ class RenderRequest:
     layer_format: str = "prores"
     crf: int = 18
     preset: str = "medium"
+    #: Моменти (в секунди), за които се иска само по един кадър вместо
+    #: цяло видео. Итерирането по вида става за секунди, а не за минути.
+    preview_times: list[float] = field(default_factory=list)
+    preview_dir: Path | None = None
     #: Папка, в която да останат междинните файлове (.ass и подобни).
     keep_dir: Path | None = None
     dry_run: bool = False
@@ -64,14 +68,31 @@ class Renderer(ABC):
     def render(self, request: RenderRequest, layouts: list[BlockLayout]) -> RenderResult:
         """Произвежда исканите изходи."""
 
+    @abstractmethod
+    def preview(self, request: RenderRequest, layouts: list[BlockLayout]) -> RenderResult:
+        """Рисува по един PNG за всеки момент от ``request.preview_times``.
+
+        Резултатът трябва да е същият, който би се получил на този кадър от
+        пълното рендиране — иначе прегледът не струва нищо.
+        """
+
     def run(self, request: RenderRequest) -> RenderResult:
         layouts = self.layout(request)
+        if request.preview_times:
+            return self.preview(request, layouts)
         if request.layer is not None and not self.supports_layer:
             raise ValueError(
                 f"стил {request.style.name!r} не може да изнесе слой с прозрачност; "
                 "слой се поддържа само от растерните стилове (напр. behind)"
             )
         return self.render(request, layouts)
+
+
+def preview_path(request: "RenderRequest", time: float) -> Path:
+    """``reel.mp4`` в 2.4 s -> ``reel.stack.2.40s.png``."""
+    directory = request.preview_dir or request.source.parent
+    stem = f"{request.source.stem}.{request.style.name}.{time:.2f}s.png"
+    return directory / stem
 
 
 REGISTRY: dict[str, type[Renderer]] = {}

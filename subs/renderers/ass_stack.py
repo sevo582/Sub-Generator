@@ -25,14 +25,16 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
-from ..burn import burn_ass, ensure_parent
+from ..burn import burn_ass, ensure_parent, preview_ass_frame
 from ..layout import deoverlap, layout_stack
 from ..models import BlockLayout, Placed
 from ..styles import ShadowSpec, StackStyle
 from ..textmetrics import font_path, measurer
-from .base import RenderRequest, RenderResult, Renderer, register
+from .base import RenderRequest, RenderResult, Renderer, preview_path, register
 
 ASS_HEADER = """[Script Info]
 ; Генерирано от subs — не редактирай на ръка, ще се презапише.
@@ -171,25 +173,51 @@ class AssStackRenderer(Renderer):
     # Рендиране
     # ------------------------------------------------------------------
 
-    def render(self, request: RenderRequest, layouts: list[BlockLayout]) -> RenderResult:
-        if request.output is None:
-            raise ValueError("стил със субтитри произвежда само готово видео — липсва изход")
-
+    def preview(self, request: RenderRequest, layouts: list[BlockLayout]) -> RenderResult:
+        """Един кадър през същия libass, който върши и пълното рендиране."""
         style = request.style.stack
-        content = self.build_ass(layouts, style, request.media.width, request.media.height)
         result = RenderResult(layouts=layouts)
+        with self._prepared(request, layouts, style) as workdir:
+            for time in request.preview_times:
+                destination = preview_path(request, time)
+                ensure_parent(destination)
+                preview_ass_frame(request.source, workdir, "subs.ass", "fonts",
+                                  time, destination)
+                result.outputs.append(destination)
+        return result
 
+    @contextmanager
+    def _prepared(self, request: RenderRequest, layouts: list[BlockLayout],
+                  style: StackStyle) -> Iterator[Path]:
+        """Подготвя папка с .ass и шрифтовете и я чисти след себе си.
+
+        Ползва се и от пълното рендиране, и от прегледа — един и същ .ass
+        стои зад двете, иначе прегледът би лъгал.
+        """
+        content = self.build_ass(layouts, style, request.media.width, request.media.height)
         workdir = Path(request.keep_dir) if request.keep_dir else Path(
             tempfile.mkdtemp(prefix="subs-ass-"))
         workdir.mkdir(parents=True, exist_ok=True)
         fonts_dir = workdir / "fonts"
         fonts_dir.mkdir(exist_ok=True)
         shutil.copy2(font_path(style.font), fonts_dir / os.path.basename(style.font))
-        ass_file = workdir / "subs.ass"
-        ass_file.write_text(content, encoding="utf-8")
-        result.notes.append(f"ASS: {len(content.splitlines()) - 15} събития")
-
+        (workdir / "subs.ass").write_text(content, encoding="utf-8")
         try:
+            yield workdir
+        finally:
+            if request.keep_dir is None and not request.dry_run:
+                shutil.rmtree(workdir, ignore_errors=True)
+
+    def render(self, request: RenderRequest, layouts: list[BlockLayout]) -> RenderResult:
+        if request.output is None:
+            raise ValueError("стил със субтитри произвежда само готово видео — липсва изход")
+
+        style = request.style.stack
+        result = RenderResult(layouts=layouts)
+
+        with self._prepared(request, layouts, style) as workdir:
+            events = len((workdir / "subs.ass").read_text(encoding="utf-8").splitlines()) - 15
+            result.notes.append(f"ASS: {events} събития")
             command = [
                 "ffmpeg", "-i", str(request.source),
                 "-vf", "ass=f=subs.ass:fontsdir=fonts", "...", str(request.output),
@@ -204,9 +232,6 @@ class AssStackRenderer(Renderer):
             burn_ass(request.source, workdir, "subs.ass", "fonts", request.output,
                      crf=request.crf, preset=request.preset)
             result.outputs.append(request.output)
-        finally:
-            if request.keep_dir is None and not request.dry_run:
-                shutil.rmtree(workdir, ignore_errors=True)
         return result
 
 

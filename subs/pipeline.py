@@ -64,6 +64,8 @@ def render(
     progress: Callable[[str], None] = print,
     media: MediaInfo | None = None,
     blocks: list[Block] | None = None,
+    preview_times: list[float] | None = None,
+    preview_dir: Path | None = None,
 ) -> RenderResult:
     """Пуска рендерера, който стилът избира."""
     info = media or probe(source)
@@ -82,5 +84,7 @@ def render(
         keep_dir=keep_dir,
         dry_run=dry_run,
         progress=progress,
+        preview_times=list(preview_times or []),
+        preview_dir=preview_dir,
     )
     return get_renderer(style.renderer).run(request)
