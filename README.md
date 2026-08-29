@@ -154,12 +154,37 @@ winget install Gyan.FFmpeg
 
 ```powershell
 py -3.11 -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\Activate.ps1
 pip install -e .
+subs styles
 ```
 
 Дотук `subs render --words ...` работи напълно — рендирането не изисква нищо
 повече.
+
+**Ако `subs` не се намира.** Командата се инсталира в папката `Scripts` на
+Python (или на виртуалната среда) и pip предупреждава, когато тя не е в `PATH`.
+Две решения:
+
+```powershell
+# работи веднага, от папката на проекта, без да се пипа PATH
+python -m subs.cli styles
+
+# или добавяш папката веднъж завинаги (пътят е в предупреждението на pip)
+$scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+[Environment]::SetEnvironmentVariable(
+    "PATH", "$env:PATH;$scripts", "User")
+```
+
+След втория вариант затвори и отвори наново терминала.
+
+Виртуалната среда решава същия проблем сама, защото `Activate.ps1` слага
+`Scripts` в `PATH` за текущата сесия — затова е и препоръчаният път. Ако
+`Activate.ps1` гръмне с „running scripts is disabled on this system":
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
 
 ### 3. Транскрипция (по избор, тежко)
 
@@ -169,10 +194,13 @@ pip install -e .[transcribe]
 
 Тегли PyTorch и е няколкостотин мегабайта.
 
-**С CUDA** (несравнимо по-бързо, ако имаш NVIDIA карта):
+**С CUDA** (несравнимо по-бързо, ако имаш NVIDIA карта). Индексът за CUDA се
+мени с всяка версия на PyTorch, затова не го преписвай оттук — вземи точната
+команда от [pytorch.org/get-started/locally](https://pytorch.org/get-started/locally/),
+където се избира операционна система и версия на CUDA. Изглежда така:
 
 ```powershell
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cuXXX
 pip install -e .[transcribe]
 subs transcribe video.mp4 --device cuda
 ```
