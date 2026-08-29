@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# Изходни файлове от рендиране
+*.subs.mp4
+*.stack.mp4
+*.behind.mp4
+*.layer.mov
+*.layer.webm
+*.words.json
+*.highlights.json

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "subs"
+version = "0.1.0"
+description = "CLI за вграждане на анимирани субтитри във вертикално видео"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "Pillow>=10.0",
+    "fonttools>=4.40",
+]
+
+[project.optional-dependencies]
+# Транскрипцията тегли torch и е тежка — затова е отделно.
+transcribe = [
+    "faster-whisper>=1.0",
+    "whisperx>=3.1",
+]
+# Избор на подчертана дума през езиков модел (v2, зад флаг).
+llm = ["anthropic>=0.40"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+subs = "subs.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["subs*"]
+
+[tool.setuptools.package-data]
+subs = ["assets/fonts/*.ttf", "assets/fonts/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
