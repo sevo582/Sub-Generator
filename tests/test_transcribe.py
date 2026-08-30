@@ -96,28 +96,34 @@ def make_whisperx(align_result=None, fail_models=()):
 # --------------------------------------------------------------------------
 
 
-def test_bulgarian_has_a_model_and_is_marked_approximate():
-    name, approximate = tr.align_model_for("bg")
-    assert name == tr.ALIGN_MODELS["bg"]
-    assert approximate, "българският няма официален модел — трябва да е отбелязан"
+def test_bulgarian_has_a_candidate_and_is_marked_approximate():
+    candidates, approximate = tr.align_model_for("bg")
+    assert candidates == tr.ALIGN_MODELS["bg"] and candidates
+    assert approximate, "българският минава през модел за друг език"
 
 
 def test_turkish_is_exact():
-    name, approximate = tr.align_model_for("tr")
-    assert name == tr.ALIGN_MODELS["tr"]
+    candidates, approximate = tr.align_model_for("tr")
+    assert candidates == tr.ALIGN_MODELS["tr"]
     assert not approximate
 
 
-def test_unknown_language_has_no_model():
-    assert tr.align_model_for("sw") == (None, False)
+def test_unknown_language_has_no_candidates():
+    assert tr.align_model_for("sw") == ((), False)
 
 
-def test_explicit_override_wins():
-    assert tr.align_model_for("bg", "мой/модел") == ("мой/модел", False)
+def test_explicit_override_wins_and_is_not_approximate():
+    assert tr.align_model_for("bg", "мой/модел") == (("мой/модел",), False)
 
 
 def test_language_code_with_region_still_matches():
     assert tr.align_model_for("bg-BG")[0] == tr.ALIGN_MODELS["bg"]
+
+
+def test_every_registered_language_has_at_least_one_candidate():
+    for language, candidates in tr.ALIGN_MODELS.items():
+        assert candidates, f"{language} е вписан, но без модел"
+        assert all(isinstance(name, str) and name for name in candidates)
 
 
 # --------------------------------------------------------------------------
@@ -198,18 +204,37 @@ def test_alignment_replaces_timings(monkeypatch, tmp_path):
     assert data.words[0].start == pytest.approx(0.02)
 
 
-def test_bulgarian_falls_back_to_the_russian_model(monkeypatch, tmp_path):
-    module = make_whisperx(fail_models=(tr.ALIGN_MODELS["bg"],))
+def test_candidates_are_tried_in_order_until_one_loads(monkeypatch, tmp_path):
+    """Недостъпен пръв кандидат не бива да спира подравняването."""
+    monkeypatch.setitem(tr.ALIGN_MODELS, "bg", ("няма/такъв", "втори/модел"))
+    module = make_whisperx(fail_models=("няма/такъв",))
     monkeypatch.setitem(sys.modules, "whisperx", module)
     data = _transcript()
     tr._align(tmp_path / "a.wav", data, tr.TranscribeOptions(device="cpu"))
-    assert module.loaded == [tr.ALIGN_MODELS["bg"], tr.ALIGN_FALLBACKS["bg"]]
+    assert module.loaded == ["няма/такъв", "втори/модел"]
     assert data.aligned
-    assert any("резервен" in note for note in data.notes)
+    assert any("не сработи" in note for note in data.notes)
+    assert any("втори/модел" in note for note in data.notes)
+
+
+def test_bulgarian_alignment_is_reported_as_approximate(monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "whisperx", make_whisperx())
+    data = _transcript(language="bg")
+    tr._align(tmp_path / "a.wav", data, tr.TranscribeOptions(device="cpu"))
+    assert data.aligned
+    assert any("приблизително" in note for note in data.notes)
+
+
+def test_turkish_alignment_is_not_called_approximate(monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "whisperx", make_whisperx())
+    data = _transcript(language="tr")
+    tr._align(tmp_path / "a.wav", data, tr.TranscribeOptions(device="cpu"))
+    assert data.aligned
+    assert not any("приблизително" in note for note in data.notes)
 
 
 def test_every_model_failing_keeps_the_original_timings(monkeypatch, tmp_path):
-    failing = (tr.ALIGN_MODELS["bg"], tr.ALIGN_FALLBACKS["bg"])
+    failing = tr.ALIGN_MODELS["bg"]
     monkeypatch.setitem(sys.modules, "whisperx", make_whisperx(fail_models=failing))
     data = _transcript()
     before = [(w.text, w.start) for w in data.words]

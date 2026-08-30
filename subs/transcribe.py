@@ -19,6 +19,7 @@ alignment модели в ``whisperx/alignment.py`` (``DEFAULT_ALIGN_MODELS_TORC
 
 from __future__ import annotations
 
+import importlib
 import os
 import tempfile
 import warnings
@@ -28,26 +29,32 @@ from pathlib import Path
 from .burn import extract_audio
 from .models import Transcript, Word
 
-#: wav2vec2 модели за forced alignment по език.
+#: Подредени кандидати за forced alignment по език. Пробват се отгоре надолу
+#: и първият, който се зареди, печели — така един недостъпен модел не спира
+#: подравняването.
 #:
-#: Българският няма официален модел в WhisperX. ``AntonyG/...-bulgarian`` е
-#: дообучен върху Common Voice и е първи избор; ако не се зареди, минаваме на
-#: руския — азбуките се припокриват достатъчно, за да е подравняването
-#: осезаемо по-добро от нищо, макар и приблизително.
-ALIGN_MODELS: dict[str, str] = {
-    "bg": "AntonyG/fine-tune-wav2vec2-large-xls-r-300m-bulgarian",
-    "tr": "mpoyraz/wav2vec2-xls-r-300m-cv7-turkish",
-    "en": "WAV2VEC2_ASR_BASE_960H",
-    "ru": "jonatasgrosman/wav2vec2-large-xlsr-53-russian",
-    "uk": "Yehor/wav2vec2-xls-r-300m-uk-with-small-lm",
+#: **За българския няма официален модел.** WhisperX не го покрива, а
+#: публичните wav2vec2 модели, дообучени на български, идват и си отиват.
+#: Затова тук стои руският: азбуките се припокриват достатъчно, за да е
+#: подравняването осезаемо по-добро от нищо, макар и приблизително.
+#:
+#: Ако намериш работещ български модел, сложи го пръв в кортежа. Търси се
+#: така (изисква huggingface_hub, който вече идва с faster-whisper)::
+#:
+#:     python -c "from huggingface_hub import HfApi; [print(m.id) for m in
+#:     HfApi().list_models(search='wav2vec2 bulgarian', limit=30)]"
+#:
+#: Провери го веднъж с ``--align-model ИМЕ``, преди да го впишеш.
+ALIGN_MODELS: dict[str, tuple[str, ...]] = {
+    "bg": ("jonatasgrosman/wav2vec2-large-xlsr-53-russian",),
+    "tr": ("mpoyraz/wav2vec2-xls-r-300m-cv7-turkish",),
+    "en": ("WAV2VEC2_ASR_BASE_960H",),
+    "ru": ("jonatasgrosman/wav2vec2-large-xlsr-53-russian",),
+    "uk": ("Yehor/wav2vec2-xls-r-300m-uk-with-small-lm",),
 }
 
-#: Резервен модел по език, ако основният не се зареди.
-ALIGN_FALLBACKS: dict[str, str] = {
-    "bg": "jonatasgrosman/wav2vec2-large-xlsr-53-russian",
-}
-
-#: Езици, за които подравняването е приблизително (чужд, но сроден модел).
+#: Езици, за които подравняването минава през модел за друг език и затова
+#: е приблизително.
 APPROXIMATE: frozenset[str] = frozenset({"bg"})
 
 
@@ -152,22 +159,19 @@ def _recognise(audio_path: Path, options: TranscribeOptions) -> Transcript:
     return Transcript(words=words, language=language, aligned=False, notes=notes)
 
 
-def align_model_for(language: str, override: str | None = None) -> tuple[str | None, bool]:
-    """Връща (име на модела, дали е приблизителен)."""
+def align_model_for(language: str,
+                    override: str | None = None) -> tuple[tuple[str, ...], bool]:
+    """Връща (кандидати по ред на предпочитание, дали е приблизително)."""
     if override:
-        return override, False
+        return (override,), False
     code = language.lower()[:2]
-    return ALIGN_MODELS.get(code), code in APPROXIMATE
+    return ALIGN_MODELS.get(code, ()), code in APPROXIMATE
 
 
 def _align(audio_path: Path, transcript: Transcript, options: TranscribeOptions) -> None:
     """Стъпка 2: forced alignment. При всяка засечка връщаме грубите тайминги."""
     language = transcript.language
-    name, approximate = align_model_for(language, options.align_model)
-    candidates = [name] if name else []
-    fallback = ALIGN_FALLBACKS.get(language.lower()[:2])
-    if fallback and fallback not in candidates:
-        candidates.append(fallback)
+    candidates, approximate = align_model_for(language, options.align_model)
 
     if not candidates:
         transcript.notes.append(
@@ -177,7 +181,7 @@ def _align(audio_path: Path, transcript: Transcript, options: TranscribeOptions)
         return
 
     try:
-        import whisperx  # noqa: F401
+        importlib.import_module("whisperx")
     except ImportError:
         transcript.notes.append(
             "whisperx не е инсталиран — таймингите са от faster-whisper и са "
@@ -196,10 +200,10 @@ def _align(audio_path: Path, transcript: Transcript, options: TranscribeOptions)
 
         transcript.aligned = True
         note = f"подравнено с {candidate!r}"
-        if approximate and index == 0:
+        if approximate:
             note += " — моделът не е за този език, подравняването е приблизително"
         elif index > 0:
-            note += " (резервен модел; подравняването е приблизително)"
+            note += " (резервен модел)"
         transcript.notes.append(note)
         return
 
