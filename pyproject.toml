@@ -32,6 +32,11 @@ dev = ["pytest>=7.4"]
 [project.scripts]
 subs = "subs.cli:main"
 
+[project.gui-scripts]
+# gui-scripts вместо scripts: на Windows тръгва през pythonw.exe и зад
+# прозореца не увисва черна конзола.
+subs-gui = "subs.gui:main"
+
 [tool.setuptools.packages.find]
 include = ["subs*"]
 
