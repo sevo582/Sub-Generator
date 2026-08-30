@@ -18,6 +18,11 @@ from typing import Any, Iterable, Literal
 
 Kind = Literal["normal", "highlight"]
 
+#: Анимации, които може да получи отделна дума. Всяка е реализирана и в
+#: двата рендерера — иначе стилът щеше да значи различно нещо според това
+#: как се рендира.
+ANIMATIONS: tuple[str, ...] = ("няма", "изскачане", "издигане", "избледняване")
+
 
 @dataclass
 class Word:
@@ -33,6 +38,10 @@ class Word:
     end: float
     emphasis: bool = False
     accent: bool = False
+    #: Собствен цвят ``#RRGGBB``; None означава цвета от стила.
+    color: str | None = None
+    #: Име от ``ANIMATIONS``. Непознато име се приема като „няма".
+    animation: str = "няма"
 
     def __post_init__(self) -> None:
         if self.end < self.start:
@@ -52,6 +61,10 @@ class Word:
             data["emphasis"] = True
         if self.accent:
             data["accent"] = True
+        if self.color:
+            data["color"] = self.color
+        if self.animation and self.animation != "няма":
+            data["animation"] = self.animation
         return data
 
     @classmethod
@@ -62,6 +75,8 @@ class Word:
             end=float(data["end"]),
             emphasis=bool(data.get("emphasis", False)),
             accent=bool(data.get("accent", False)),
+            color=data.get("color") or None,
+            animation=str(data.get("animation") or "няма"),
         )
 
 
@@ -143,6 +158,9 @@ class Placed:
     visible_from: float
     hidden_after: float
     accent: bool = False
+    #: Собствен цвят на думата; None = цветът от стила.
+    color: str | None = None
+    animation: str = "няма"
     width: float = 0.0
     height: float = 0.0
 

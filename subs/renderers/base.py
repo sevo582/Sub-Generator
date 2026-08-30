@@ -37,6 +37,13 @@ class RenderRequest:
     #: цяло видео. Итерирането по вида става за секунди, а не за минути.
     preview_times: list[float] = field(default_factory=list)
     preview_dir: Path | None = None
+    #: (начало, времетраене) за рендиране само на парче — бързият преглед
+    #: в прозореца. None = цялото видео.
+    segment: tuple[float, float] | None = None
+    #: Височина, до която да се смали изходът. None = както е входът.
+    scale_height: int | None = None
+    #: Кадрова честота на изхода. None = както е входът.
+    fps: float | None = None
     #: Папка, в която да останат междинните файлове (.ass и подобни).
     keep_dir: Path | None = None
     dry_run: bool = False

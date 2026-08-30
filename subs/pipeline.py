@@ -111,6 +111,9 @@ def render(
     blocks: list[Block] | None = None,
     preview_times: list[float] | None = None,
     preview_dir: Path | None = None,
+    segment: tuple[float, float] | None = None,
+    scale_height: int | None = None,
+    fps: float | None = None,
 ) -> RenderResult:
     """Пуска рендерера, който стилът избира."""
     info = media or probe(source)
@@ -131,5 +134,8 @@ def render(
         progress=progress,
         preview_times=list(preview_times or []),
         preview_dir=preview_dir,
+        segment=segment,
+        scale_height=scale_height,
+        fps=fps,
     )
     return get_renderer(style.renderer).run(request)

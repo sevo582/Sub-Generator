@@ -32,6 +32,17 @@ LANGUAGES = (("автоматично", None), ("български", "bg"),
 VIDEO_TYPES = [("Видео", "*.mp4 *.mov *.m4v *.avi *.mkv *.webm"), ("Всички", "*.*")]
 JSON_TYPES = [("JSON с думи", "*.json"), ("Всички", "*.*")]
 
+#: Бърза палитра до избирача на цвят — това са цветовете, които се ползват
+#: най-често, за да не се минава през диалог за всяка дума.
+PALETTE = ("#FFFFFF", "#FF3B30", "#FF9F0A", "#FFD60A",
+           "#30D158", "#0A84FF", "#8FE9F7", "#BF5AF2")
+
+#: Преглед на парче: колко секунди и с каква едрина да се рендира. Малко
+#: и дребно нарочно — целта е да се види след секунди, не да е за качване.
+PREVIEW_SECONDS = 3.0
+PREVIEW_HEIGHT = 480
+PREVIEW_FPS = 12.0
+
 
 # --------------------------------------------------------------------------
 # Чиста логика — без tkinter, тества се без дисплей
@@ -59,19 +70,29 @@ class Row:
     end: float
     emphasis: bool = False
     accent: bool = False
+    color: str | None = None
+    animation: str = "няма"
 
-    def values(self) -> tuple[str, str, str, str]:
+    def values(self) -> tuple[str, str, str, str, str, str]:
         marks = ("★" if self.emphasis else "") + ("●" if self.accent else "")
-        return self.text, format_time(self.start), format_time(self.end), marks
+        return (self.text, format_time(self.start), format_time(self.end), marks,
+                self.color or "—", self.animation)
+
+    @property
+    def middle(self) -> float:
+        """Средата на думата — там се показва кадърът при преглед."""
+        return (self.start + self.end) / 2.0
 
 
 def rows_from_transcript(transcript: Transcript) -> list[Row]:
-    return [Row(w.text, w.start, w.end, w.emphasis, w.accent) for w in transcript.words]
+    return [Row(w.text, w.start, w.end, w.emphasis, w.accent, w.color, w.animation)
+            for w in transcript.words]
 
 
 def transcript_from_rows(rows: Iterable[Row], language: str | None,
                          notes: list[str] | None = None) -> Transcript:
-    words = [Word(r.text, r.start, r.end, r.emphasis, r.accent) for r in rows]
+    words = [Word(r.text, r.start, r.end, r.emphasis, r.accent, r.color, r.animation)
+             for r in rows]
     return Transcript(words=words, language=language or "unknown",
                       notes=list(notes or []))
 
@@ -92,6 +113,18 @@ def validate(rows: list[Row]) -> list[str]:
         if following.start < current.end - 1e-6:
             problems.append(f"редове {index} и {index + 1} се застъпват във времето")
     return problems
+
+
+def preview_window(rows: list[Row], index: int, duration: float,
+                   limit: float) -> tuple[float, float]:
+    """Кой отрязък да се рендира при „Пусни" от даден ред.
+
+    Започва малко преди думата, за да се види как влиза, и не излиза извън
+    видеото.
+    """
+    start = max(0.0, rows[index].start - 0.4) if 0 <= index < len(rows) else 0.0
+    length = max(0.2, min(duration, max(0.2, limit - start)))
+    return start, length
 
 
 def default_output(video: Path, style: str) -> Path:

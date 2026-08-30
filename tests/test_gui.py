@@ -10,8 +10,8 @@ from __future__ import annotations
 import pytest
 
 from subs.gui import (LANGUAGES, MODELS, Row, default_output, format_time,
-                      parse_time, rows_from_transcript, transcript_from_rows,
-                      validate)
+                      parse_time, preview_window, rows_from_transcript,
+                      transcript_from_rows, validate)
 from subs.models import Transcript, Word
 from pathlib import Path
 
@@ -89,3 +89,65 @@ def test_language_choices_cover_the_priority_languages():
 
 def test_models_are_ordered_from_small_to_large():
     assert MODELS[0] == "tiny" and MODELS[-1].startswith("large")
+
+
+# --------------------------------------------------------------------------
+# Цвят, анимация и преглед на парче
+# --------------------------------------------------------------------------
+
+
+def test_row_shows_colour_and_animation():
+    values = Row("а", 0, 1, color="#FF3B30", animation="изскачане").values()
+    assert values[4] == "#FF3B30" and values[5] == "изскачане"
+
+
+def test_row_without_colour_shows_a_dash():
+    assert Row("а", 0, 1).values()[4] == "—"
+
+
+def test_middle_is_where_the_frame_is_drawn():
+    assert Row("а", 1.0, 2.0).middle == pytest.approx(1.5)
+
+
+def test_colour_and_animation_survive_the_table():
+    original = Transcript(
+        words=[Word("а", 0, 1, color="#0A84FF", animation="издигане")], language="bg")
+    restored = transcript_from_rows(rows_from_transcript(original), "bg")
+    assert restored.words[0].color == "#0A84FF"
+    assert restored.words[0].animation == "издигане"
+
+
+def test_palette_entries_are_valid_hex():
+    from subs.gui import PALETTE
+
+    for colour in PALETTE:
+        assert len(colour) == 7 and colour.startswith("#")
+        int(colour[1:], 16)
+
+
+def test_preview_window_starts_a_little_before_the_word():
+    rows = [Row("а", 0.0, 0.4), Row("б", 2.0, 2.4)]
+    start, length = preview_window(rows, 1, 3.0, 10.0)
+    assert start == pytest.approx(1.6), "тръгва преди думата, за да се види как влиза"
+    assert length == pytest.approx(3.0)
+
+
+def test_preview_window_never_starts_before_zero():
+    assert preview_window([Row("а", 0.1, 0.4)], 0, 3.0, 10.0)[0] == 0.0
+
+
+def test_preview_window_is_clipped_to_the_video():
+    rows = [Row("а", 4.8, 5.0)]
+    start, length = preview_window(rows, 0, 3.0, 5.0)
+    assert start + length <= 5.0 + 1e-6
+
+
+def test_preview_window_survives_an_empty_table():
+    assert preview_window([], 0, 3.0, 5.0) == (0.0, 3.0)
+
+
+def test_animations_are_the_ones_the_renderers_know():
+    from subs.models import ANIMATIONS
+
+    assert ANIMATIONS[0] == "няма"
+    assert set(ANIMATIONS) == {"няма", "изскачане", "издигане", "избледняване"}

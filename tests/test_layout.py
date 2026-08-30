@@ -313,3 +313,36 @@ def test_first_block_never_appears_before_zero(style):
     layout = deoverlap([layout_stack(block, style.stack, measurer(style.stack.font),
                                      WIDTH, HEIGHT)])[0]
     assert layout.appear >= 0.0
+
+
+# --------------------------------------------------------------------------
+# Цвят и анимация на отделна дума
+# --------------------------------------------------------------------------
+
+
+def test_word_colour_and_animation_reach_the_renderer(style):
+    block = Block(words("едно две три четири"))
+    block.words[1].color = "#FF3B30"
+    block.words[1].animation = "изскачане"
+    block.highlight = 0
+    layout = layout_stack(block, style.stack, measurer(style.stack.font), WIDTH, HEIGHT)
+    placed = layout.placed[1]
+    assert placed.color == "#FF3B30" and placed.animation == "изскачане"
+
+
+def test_behind_carries_colour_to_the_key_word():
+    style = get_style("behind")
+    block = Block(words("това голф игрище"))
+    block.words[2].color = "#30D158"
+    block.highlight = 2
+    layout = layout_behind(block, style.behind, measurer(style.behind.font_key),
+                           measurer(style.behind.font_plain), WIDTH, HEIGHT)
+    key = next(p for p in layout.placed if p.kind == "highlight")
+    assert key.color == "#30D158"
+
+
+def test_words_without_settings_stay_neutral(style):
+    block = Block(words("едно две три четири"))
+    block.highlight = 0
+    layout = layout_stack(block, style.stack, measurer(style.stack.font), WIDTH, HEIGHT)
+    assert all(p.color is None and p.animation == "няма" for p in layout.placed)

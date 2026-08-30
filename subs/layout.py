@@ -284,6 +284,8 @@ def layout_stack(
                     hidden_after=disappear,
                     accent=word.accent
                     or (style.accent_all_highlights and word_index == block.highlight),
+                    color=word.color,
+                    animation=word.animation,
                     width=width,
                     height=line.size,
                 )
@@ -409,6 +411,8 @@ def layout_behind(
                     visible_from=appear,
                     hidden_after=disappear,
                     accent=False,
+                    color=word.color,
+                    animation=word.animation,
                     width=word_width,
                     height=plain_size,
                 )
@@ -431,6 +435,8 @@ def layout_behind(
             visible_from=appear,
             hidden_after=disappear,
             accent=True,
+            color=key_word.color,
+            animation=key_word.animation,
             width=key_width,
             height=key_size,
         )

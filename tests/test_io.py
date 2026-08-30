@@ -161,3 +161,27 @@ def test_style_file_in_windows_codepage_is_read(tmp_path, monkeypatch):
     path.write_bytes(json.dumps(
         {"extends": "stack", "name": "мой стил"}, ensure_ascii=False).encode("cp1251"))
     assert load_style_file(str(path)).name == "мой стил"
+
+
+def test_colour_and_animation_are_written_and_read(tmp_path):
+    from subs.models import Transcript as T
+
+    path = tmp_path / "w.json"
+    save_words(T(words=[Word("дума", 0, 1, color="#FF3B30", animation="издигане")],
+                 language="bg"), path)
+    word = load_words(path).words[0]
+    assert word.color == "#FF3B30" and word.animation == "издигане"
+
+
+def test_defaults_are_not_written_out(tmp_path):
+    """Файлът се чете на ръка — няма смисъл да е пълен с „animation: няма"."""
+    path = tmp_path / "w.json"
+    save_words(Transcript(words=[Word("дума", 0, 1)], language="bg"), path)
+    text = path.read_text(encoding="utf-8")
+    assert "animation" not in text and "color" not in text
+
+
+def test_unknown_animation_falls_back_to_none(tmp_path):
+    path = tmp_path / "w.json"
+    write(path, {"words": [{"text": "а", "start": 0, "end": 1, "animation": ""}]})
+    assert load_words(path).words[0].animation == "няма"

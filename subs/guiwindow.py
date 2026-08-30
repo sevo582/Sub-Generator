@@ -7,17 +7,20 @@
 
 from __future__ import annotations
 
+import tempfile
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
 from typing import Callable
 
 from PIL import Image, ImageTk
 
-from .burn import MediaInfo, probe
-from .gui import (JSON_TYPES, LANGUAGES, MODELS, Row, VIDEO_TYPES, Worker,
-                  default_output, parse_time, reveal, rows_from_transcript,
-                  transcript_from_rows, validate)
+from .burn import MediaInfo, decode_rgb_frames, probe
+from .gui import (JSON_TYPES, LANGUAGES, MODELS, PALETTE, PREVIEW_FPS,
+                  PREVIEW_HEIGHT, PREVIEW_SECONDS, Row, VIDEO_TYPES, Worker,
+                  default_output, parse_time, preview_window, reveal,
+                  rows_from_transcript, transcript_from_rows, validate)
+from .models import ANIMATIONS
 from .pipeline import build_blocks, load_words, render, save_words
 from .styles import PRESETS, get_style
 from .transcribe import TranscribeOptions, transcribe
@@ -29,8 +32,8 @@ class App(tk.Tk):
     def __init__(self, argv: list[str] | None = None) -> None:
         super().__init__()
         self.title("subs — анимирани субтитри")
-        self.geometry("1180x780")
-        self.minsize(900, 620)
+        self.geometry("1360x840")
+        self.minsize(1080, 660)
 
         self.worker = Worker()
         self.rows: list[Row] = []
@@ -45,6 +48,13 @@ class App(tk.Tk):
         self.model = tk.StringVar(value="small")
         self.preview_at = tk.StringVar(value="2.50")
         self.status = tk.StringVar(value="Избери видео, за да започнеш.")
+        self.follow = tk.BooleanVar(value=True)
+
+        #: Кадри на пуснатото парче и докъде е стигнало възпроизвеждането.
+        self.play_frames: list[ImageTk.PhotoImage] = []
+        self.play_index = 0
+        self.play_job: str | None = None
+        self.follow_job: str | None = None
 
         self._build()
         self._pump()
@@ -108,34 +118,62 @@ class App(tk.Tk):
     def _build_middle(self) -> None:
         pane = ttk.PanedWindow(self, orient="horizontal")
         pane.pack(fill="both", expand=True, padx=PAD, pady=PAD)
+        # Таблицата има шест колони и си иска ширина; без изрична преграда
+        # тя изяжда прегледа и от него остава ивица.
+        self.after(60, lambda: self._place_sash(pane))
 
         left = ttk.LabelFrame(pane, text="Думи — двоен клик за редакция", padding=4)
         pane.add(left, weight=3)
 
-        columns = ("text", "start", "end", "marks")
+        columns = ("text", "start", "end", "marks", "color", "anim")
         self.tree = ttk.Treeview(left, columns=columns, show="tree headings",
                                  selectmode="browse")
-        self.tree.heading("#0", text="№")
-        self.tree.heading("text", text="Дума")
-        self.tree.heading("start", text="Начало")
-        self.tree.heading("end", text="Край")
-        self.tree.heading("marks", text="★ ●")
-        self.tree.column("#0", width=48, stretch=False, anchor="e")
-        self.tree.column("text", width=240)
-        self.tree.column("start", width=76, anchor="e", stretch=False)
-        self.tree.column("end", width=76, anchor="e", stretch=False)
-        self.tree.column("marks", width=56, anchor="center", stretch=False)
+        for name, title in (("#0", "№"), ("text", "Дума"), ("start", "Начало"),
+                            ("end", "Край"), ("marks", "★ ●"), ("color", "Цвят"),
+                            ("anim", "Анимация")):
+            self.tree.heading(name, text=title)
+        self.tree.column("#0", width=44, stretch=False, anchor="e")
+        self.tree.column("text", width=190)
+        self.tree.column("start", width=68, anchor="e", stretch=False)
+        self.tree.column("end", width=68, anchor="e", stretch=False)
+        self.tree.column("marks", width=48, anchor="center", stretch=False)
+        self.tree.column("color", width=84, anchor="center", stretch=False)
+        self.tree.column("anim", width=112, anchor="center", stretch=False)
 
         scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         self.tree.bind("<Double-1>", self._on_double_click)
+        # Стрелките вече местят избора сами; ние само реагираме на смяната.
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+        self.tree.bind("<Return>", self._edit_selected_text)
+        self.tree.bind("<Delete>", lambda _e: self._set_color(None))
 
-        hint = ttk.Frame(left)
-        hint.pack(side="bottom", fill="x")
-        ttk.Label(hint, text="★ = подчертана дума    ● = акцентен цвят",
-                  foreground="#666").pack(side="left", padx=4, pady=2)
+        tools = ttk.Frame(left)
+        tools.pack(side="bottom", fill="x", pady=(4, 0))
+        ttk.Label(tools, text="Цвят:").pack(side="left", padx=(4, 2))
+        for colour in PALETTE:
+            swatch = tk.Button(tools, background=colour, width=2, relief="ridge",
+                               borderwidth=1,
+                               command=lambda c=colour: self._set_color(c))
+            swatch.pack(side="left", padx=1)
+        ttk.Button(tools, text="…", width=3,
+                   command=self._pick_color).pack(side="left", padx=(4, 2))
+        ttk.Button(tools, text="Изчисти", width=8,
+                   command=lambda: self._set_color(None)).pack(side="left")
+
+        ttk.Label(tools, text="Анимация:").pack(side="left", padx=(PAD, 2))
+        self.animation = tk.StringVar(value=ANIMATIONS[0])
+        animations = ttk.Combobox(tools, textvariable=self.animation, width=13,
+                                  state="readonly", values=list(ANIMATIONS))
+        animations.pack(side="left")
+        animations.bind("<<ComboboxSelected>>",
+                        lambda _e: self._set_animation(self.animation.get()))
+
+        ttk.Label(left, text="↑ ↓ между думите · Enter редактира · "
+                             "★ ● с двоен клик · Delete маха цвета",
+                  foreground="#666").pack(side="bottom", fill="x", padx=4)
 
         right = ttk.LabelFrame(pane, text="Преглед", padding=4)
         pane.add(right, weight=4)
@@ -143,15 +181,27 @@ class App(tk.Tk):
         bar = ttk.Frame(right)
         bar.pack(fill="x")
         ttk.Label(bar, text="Секунда:").pack(side="left")
-        ttk.Entry(bar, textvariable=self.preview_at, width=8).pack(side="left", padx=4)
-        self.button_preview = ttk.Button(bar, text="Покажи кадър",
-                                         command=self._preview)
-        self.button_preview.pack(side="left", padx=4)
+        ttk.Entry(bar, textvariable=self.preview_at, width=7).pack(side="left", padx=4)
+        self.button_preview = ttk.Button(bar, text="Кадър", command=self._preview)
+        self.button_preview.pack(side="left", padx=2)
+        self.button_play = ttk.Button(bar, text="▶ Пусни", command=self._play)
+        self.button_play.pack(side="left", padx=2)
+        self.button_stop = ttk.Button(bar, text="■", width=3, state="disabled",
+                                      command=self._stop_playback)
+        self.button_stop.pack(side="left", padx=2)
+        ttk.Checkbutton(bar, text="следвай избора", variable=self.follow
+                        ).pack(side="left", padx=(PAD, 0))
 
         self.canvas = tk.Label(right, background="#1c1c1c",
                                text="Тук се показва кадър от рендера.",
                                foreground="#888")
         self.canvas.pack(fill="both", expand=True, pady=(4, 0))
+
+    def _place_sash(self, pane: ttk.PanedWindow) -> None:
+        try:
+            pane.sashpos(0, 660)
+        except tk.TclError:
+            pass
 
     def _build_actions(self) -> None:
         frame = ttk.Frame(self)
@@ -188,7 +238,7 @@ class App(tk.Tk):
     def _busy(self, busy: bool, what: str = "") -> None:
         state = "disabled" if busy else "normal"
         for button in (self.button_transcribe, self.button_render,
-                       self.button_layer, self.button_preview):
+                       self.button_layer, self.button_preview, self.button_play):
             button.configure(state=state)
         if busy:
             self.progress.start(12)
@@ -292,7 +342,22 @@ class App(tk.Tk):
         self.tree.delete(*self.tree.get_children())
         for index, row in enumerate(self.rows):
             self.tree.insert("", "end", iid=str(index), text=str(index + 1),
-                             values=row.values())
+                             values=row.values(), tags=self._tag_for(row))
+        if self.rows:
+            self.tree.selection_set("0")
+            self.tree.focus("0")
+
+    def _tag_for(self, row: Row) -> tuple[str, ...]:
+        """Оцветява реда в цвета на думата — вижда се, без да се чете кодът."""
+        if not row.color:
+            return ()
+        tag = f"colour{row.color.lstrip('#')}"
+        self.tree.tag_configure(tag, foreground=row.color)
+        return (tag,)
+
+    def _refresh_row(self, index: int) -> None:
+        row = self.rows[index]
+        self.tree.item(str(index), values=row.values(), tags=self._tag_for(row))
 
     def _log_blocks(self) -> None:
         """Показва как ще се разбият блоковете и коя дума е подчертана."""
@@ -324,7 +389,7 @@ class App(tk.Tk):
                 row.accent = True
             else:
                 row.emphasis = row.accent = False
-            self.tree.item(item, values=row.values())
+            self._refresh_row(index)
             self._log_blocks()
             return
 
@@ -353,7 +418,7 @@ class App(tk.Tk):
                 self.log(f"невалидна стойност: {raw!r}")
                 return
             setattr(self.rows[index], field, value)
-            self.tree.item(item, values=self.rows[index].values())
+            self._refresh_row(index)
             for problem in validate(self.rows):
                 self.log(f"внимание: {problem}")
             self._log_blocks()
@@ -365,6 +430,141 @@ class App(tk.Tk):
         entry.bind("<Return>", commit)
         entry.bind("<FocusOut>", commit)
         entry.bind("<Escape>", cancel)
+
+    # ------------------------------------------------------------------
+    # Избор, цвят, анимация
+    # ------------------------------------------------------------------
+
+    def _selected_index(self) -> int | None:
+        selection = self.tree.selection()
+        return int(selection[0]) if selection else None
+
+    def _on_select(self, _event: tk.Event | None = None) -> None:
+        """Смяна на избора: показва настройките на думата и по желание
+        премества прегледа при нея."""
+        index = self._selected_index()
+        if index is None:
+            return
+        row = self.rows[index]
+        self.animation.set(row.animation)
+        self.preview_at.set(format(row.middle, ".2f"))
+        self.status.set(f"Дума {index + 1} от {len(self.rows)}: {row.text!r}")
+
+        if self.follow_job is not None:
+            self.after_cancel(self.follow_job)
+            self.follow_job = None
+        if self.follow.get() and not self.worker.busy:
+            # Изчакваме малко: при задържана стрелка иначе се пуска по един
+            # рендер на всяка дума, през която минаваме.
+            self.follow_job = self.after(400, self._preview)
+
+    def _edit_selected_text(self, _event: tk.Event | None = None) -> str:
+        index = self._selected_index()
+        if index is not None:
+            self._edit_cell(str(index), "#1", index, "text")
+        return "break"
+
+    def _apply_to_selection(self, change) -> None:
+        index = self._selected_index()
+        if index is None:
+            messagebox.showinfo("Няма избрана дума", "Първо избери ред в таблицата.")
+            return
+        change(self.rows[index])
+        self._refresh_row(index)
+        self._log_blocks()
+
+    def _set_color(self, colour: str | None) -> None:
+        def change(row: Row) -> None:
+            row.color = colour
+        self._apply_to_selection(change)
+
+    def _pick_color(self) -> None:
+        index = self._selected_index()
+        current = self.rows[index].color if index is not None else None
+        chosen = colorchooser.askcolor(color=current or "#FFFFFF",
+                                       title="Цвят на думата")[1]
+        if chosen:
+            self._set_color(chosen.upper())
+
+    def _set_animation(self, name: str) -> None:
+        def change(row: Row) -> None:
+            row.animation = name
+        self._apply_to_selection(change)
+
+    # ------------------------------------------------------------------
+    # Възпроизвеждане на парче
+    # ------------------------------------------------------------------
+
+    def _play(self) -> None:
+        """Рендира кратко парче от текущото място и го пуска в прозореца.
+
+        Минава през същия рендерер както готовото видео, само смалено и с
+        по-малко кадри — иначе прегледът щеше да показва нещо, което не е
+        това, което ще излезе.
+        """
+        path = self._video_path()
+        if path is None or self.worker.busy:
+            return
+        if not self.rows:
+            messagebox.showinfo("Няма думи", "Първо транскрибирай или зареди JSON.")
+            return
+
+        self._stop_playback()
+        index = self._selected_index()
+        if index is None:
+            try:
+                start = parse_time(self.preview_at.get())
+            except ValueError:
+                start = 0.0
+            index = min(range(len(self.rows)),
+                        key=lambda i: abs(self.rows[i].middle - start))
+        limit = self.media.duration if self.media else 1e9
+        window = preview_window(self.rows, index, PREVIEW_SECONDS, limit)
+
+        style = get_style(self.style_name.get())
+        transcript = transcript_from_rows(self.rows, self._selected_language())
+        temp = Path(tempfile.mkdtemp(prefix="subs-play-")) / "preview.mp4"
+        self.log(f"правя преглед {window[0]:.2f}–{window[0] + window[1]:.2f} s …")
+        self._busy(True, "Правя преглед…")
+
+        def work(log: Callable[[str], None]) -> object:
+            render(path, transcript, style, output=temp, media=self.media,
+                   segment=window, scale_height=PREVIEW_HEIGHT, fps=PREVIEW_FPS,
+                   progress=lambda _m: None)
+            return decode_rgb_frames(temp)
+
+        self.worker.start(work)
+        self.pending = ("play", temp)
+
+    def _start_playback(self, decoded: tuple[int, int, float, list[bytes]]) -> None:
+        width, height, fps, raw = decoded
+        if not raw:
+            self.log("прегледът излезе празен")
+            return
+        self.play_frames = [
+            ImageTk.PhotoImage(Image.frombytes("RGB", (width, height), data))
+            for data in raw
+        ]
+        self.play_index = 0
+        self.button_stop.configure(state="normal")
+        self.log(f"{len(self.play_frames)} кадъра @ {fps:.0f} к/с")
+        self._advance(max(20, int(1000 / max(1.0, fps))))
+
+    def _advance(self, delay: int) -> None:
+        if not self.play_frames:
+            return
+        self.canvas.configure(image=self.play_frames[self.play_index], text="")
+        self.play_index += 1
+        if self.play_index >= len(self.play_frames):
+            self.play_index = 0  # въртим в кръг, за да се огледа спокойно
+        self.play_job = self.after(delay, lambda: self._advance(delay))
+
+    def _stop_playback(self) -> None:
+        if self.play_job is not None:
+            self.after_cancel(self.play_job)
+            self.play_job = None
+        self.play_frames = []
+        self.button_stop.configure(state="disabled")
 
     # ------------------------------------------------------------------
     # Задачи
@@ -479,6 +679,11 @@ class App(tk.Tk):
         outputs = getattr(result, "outputs", [])
         for note in getattr(result, "notes", []):
             self.log(note)
+        if what == "play":
+            self._start_playback(result)
+            self.status.set("Преглед — върти се в кръг, ■ спира.")
+            return
+
         if what == "preview" and outputs:
             self._show_preview(Path(outputs[0]))
             self.status.set("Кадърът е готов.")

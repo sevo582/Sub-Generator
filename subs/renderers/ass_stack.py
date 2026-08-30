@@ -122,7 +122,13 @@ class AssStackRenderer(Renderer):
     def _events(self, word: Placed, style: StackStyle, height: int,
                 factor: float) -> list[str]:
         size = word.size * factor
-        colour = ass_colour(style.accent_color if word.accent else style.color)
+        # Собственият цвят на думата бие акцентния, а той — цвета на стила.
+        if word.color:
+            colour = ass_colour(word.color)
+        elif word.accent:
+            colour = ass_colour(style.accent_color)
+        else:
+            colour = ass_colour(style.color)
         shadow = style.shadow
 
         events: list[str] = []
@@ -133,20 +139,44 @@ class AssStackRenderer(Renderer):
 
         if dim_end - dim_start > 0.01:
             events += self._pair(word, size, colour, style.dim_alpha, dim_start, dim_end,
-                                 shadow, height, fade_from=None)
+                                 shadow, height, style, fade_from=None, animate=False)
         if solid_end - solid_start > 0.01:
+            fade_ms = (style.fade_in_ms if word.animation == "избледняване"
+                       else style.fade_ms)
             events += self._pair(word, size, colour, 1.0, solid_start, solid_end,
-                                 shadow, height,
-                                 fade_from=style.dim_alpha if style.fade_ms > 0 else None,
-                                 fade_ms=style.fade_ms)
+                                 shadow, height, style,
+                                 fade_from=style.dim_alpha if fade_ms > 0 else None,
+                                 fade_ms=fade_ms, animate=True)
         return events
+
+    @staticmethod
+    def _placement(word: Placed, size: float, style: StackStyle, height: int,
+                   animate: bool, dx: float = 0.0, dy: float = 0.0) -> str:
+        """Котва и позиция.
+
+        „Изскачането" мащабира текста, а мащабирането в ASS става спрямо
+        котвата. При ``\\an7`` думата би се разтегляла надясно-надолу вместо
+        да набъбва на място, затова за нея минаваме на ``\\an5`` и подаваме
+        центъра. Котвата е една и съща за избледнялото и за плътното
+        събитие — иначе думата подскача при смяната на състоянието.
+        """
+        if word.animation == "изскачане":
+            centre_x = word.x + word.width / 2.0 + dx
+            centre_y = word.y + size / 2.0 + dy
+            return f"\\an5\\pos({centre_x:.1f},{centre_y:.1f})"
+        if word.animation == "издигане" and animate:
+            rise = style.rise_by * height
+            return (f"\\an7\\move({word.x + dx:.1f},{word.y + dy + rise:.1f},"
+                    f"{word.x + dx:.1f},{word.y + dy:.1f},0,{style.rise_ms})")
+        return f"\\an7\\pos({word.x + dx:.1f},{word.y + dy:.1f})"
 
     def _pair(self, word: Placed, size: float, colour: str, opacity: float,
               start: float, end: float, shadow: ShadowSpec, height: int,
-              fade_from: float | None, fade_ms: int = 0) -> list[str]:
+              style: StackStyle, fade_from: float | None, fade_ms: int = 0,
+              animate: bool = False) -> list[str]:
         """Едно събитие за сянката (слой 0) и едно за текста (слой 1)."""
         text = escape(word.text)
-        common = f"\\an7\\bord0\\shad0\\fs{size:.1f}"
+        common = f"\\bord0\\shad0\\fs{size:.1f}"
 
         def transition(base: float) -> str:
             if fade_from is None:
@@ -154,14 +184,20 @@ class AssStackRenderer(Renderer):
             return (f"\\alpha{ass_alpha(base * fade_from)}"
                     f"\\t(0,{fade_ms},\\alpha{ass_alpha(base)})")
 
+        scale = ""
+        if animate and word.animation == "изскачане":
+            percent = round(style.pop_from * 100)
+            scale = (f"\\fscx{percent}\\fscy{percent}"
+                     f"\\t(0,{style.pop_ms},\\fscx100\\fscy100)")
+
         blur = shadow.blur * height
         shadow_tags = (
-            f"{common}\\pos({word.x + shadow.dx * height:.1f},"
-            f"{word.y + shadow.dy * height:.1f})"
-            f"\\1c{ass_colour(shadow.color)}\\blur{blur:.1f}"
-            f"{transition(opacity * shadow.alpha)}"
+            f"{self._placement(word, size, style, height, animate, shadow.dx * height, shadow.dy * height)}"
+            f"{common}\\1c{ass_colour(shadow.color)}\\blur{blur:.1f}"
+            f"{scale}{transition(opacity * shadow.alpha)}"
         )
-        text_tags = f"{common}\\pos({word.x:.1f},{word.y:.1f})\\1c{colour}{transition(opacity)}"
+        text_tags = (f"{self._placement(word, size, style, height, animate)}"
+                     f"{common}\\1c{colour}{scale}{transition(opacity)}")
 
         stamp = f"{timestamp(start)},{timestamp(end)}"
         return [
@@ -230,7 +266,9 @@ class AssStackRenderer(Renderer):
             ensure_parent(request.output)
             request.progress(f"вграждам субтитрите в {request.output.name} …")
             burn_ass(request.source, workdir, "subs.ass", "fonts", request.output,
-                     crf=request.crf, preset=request.preset)
+                     crf=request.crf, preset=request.preset,
+                     segment=request.segment, scale_height=request.scale_height,
+                     fps=request.fps)
             result.outputs.append(request.output)
         return result
 

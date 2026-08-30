@@ -171,24 +171,45 @@ def burn_ass(
     output: str | os.PathLike[str],
     crf: int = 18,
     preset: str = "medium",
+    segment: tuple[float, float] | None = None,
+    scale_height: int | None = None,
+    fps: float | None = None,
 ) -> list[str]:
     """Вгражда .ass във видеото.
 
     ``ass_dir`` е работната папка; ``ass_name`` и ``fonts_subdir`` са
     относителни спрямо нея имена без двоеточие — виж бележката най-горе.
+
+    ``segment`` (начало, времетраене) реже парче — ползва се за бързия
+    преглед в прозореца. ``-copyts`` е задължително при него: без него
+    ffmpeg нулира времената, филтърът ``ass`` вижда парчето като начало на
+    видеото и рисува грешния блок.
+
     Връща командата, за да може да се покаже при ``--dry-run``.
     """
-    filter_string = f"ass=f={ass_name}:fontsdir={fonts_subdir}"
-    command = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-i", os.path.abspath(str(source)),
-        "-vf", filter_string,
+    filters = [f"ass=f={ass_name}:fontsdir={fonts_subdir}"]
+    if scale_height:
+        filters.append(f"scale=-2:{int(scale_height)}")
+
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    if segment is not None:
+        command += ["-ss", f"{max(0.0, segment[0]):.3f}", "-copyts"]
+    command += ["-i", os.path.abspath(str(source))]
+    if segment is not None:
+        # ``-to`` е абсолютно, а ``-t`` е относително. С ``-copyts`` времената
+        # остават абсолютни, тоест ``-t`` би отрязало парчето от нулата на
+        # видеото и щеше да върне по-малко, отколкото е поискано.
+        command += ["-to", f"{max(0.0, segment[0]) + max(0.05, segment[1]):.3f}",
+                    "-avoid_negative_ts", "make_zero"]
+    command += ["-vf", ",".join(filters)]
+    if fps:
+        command += ["-r", f"{fps:.4f}"]
+    command += [
         "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
         "-pix_fmt", "yuv420p",
-        "-c:a", "copy",
-        "-movflags", "+faststart",
-        os.path.abspath(str(output)),
     ]
+    command += ["-an"] if segment is not None else ["-c:a", "copy"]
+    command += ["-movflags", "+faststart", os.path.abspath(str(output))]
     run(command, cwd=str(ass_dir))
     return command
 
@@ -259,6 +280,9 @@ def build_raster_command(
     layer_format: str = "prores",
     crf: int = 18,
     preset: str = "medium",
+    segment: tuple[float, float] | None = None,
+    scale_height: int | None = None,
+    fps: float | None = None,
 ) -> list[str]:
     """Сглобява една ffmpeg команда с два изхода от един поток кадри.
 
@@ -270,20 +294,27 @@ def build_raster_command(
     if layer_format not in LAYER_CODECS:
         raise ValueError(f"непознат формат за слоя: {layer_format!r}")
 
-    command = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-i", os.path.abspath(str(source)),
+    rate = fps or media.fps
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    if segment is not None:
+        command += ["-ss", f"{max(0.0, segment[0]):.3f}"]
+    command += ["-i", os.path.abspath(str(source))]
+    command += [
         "-f", "rawvideo", "-pixel_format", "rgba",
         "-video_size", f"{media.width}x{media.height}",
-        "-framerate", f"{media.fps:.6f}",
+        "-framerate", f"{rate:.6f}",
         "-i", "-",
     ]
+    if segment is not None:
+        command += ["-t", f"{max(0.05, segment[1]):.3f}"]
 
+    tail = f",scale=-2:{int(scale_height)}" if scale_height else ""
     if output is not None and layer is not None:
-        graph = "[1:v]split=2[lay][ovl];[0:v][ovl]overlay=format=auto:shortest=1[comp]"
+        graph = ("[1:v]split=2[lay][ovl];"
+                 f"[0:v][ovl]overlay=format=auto:shortest=1{tail}[comp]")
         overlay_label, layer_label = "[comp]", "[lay]"
     elif output is not None:
-        graph = "[0:v][1:v]overlay=format=auto:shortest=1[comp]"
+        graph = f"[0:v][1:v]overlay=format=auto:shortest=1{tail}[comp]"
         overlay_label, layer_label = "[comp]", None
     else:
         graph = "[1:v]null[lay]"
@@ -292,10 +323,14 @@ def build_raster_command(
 
     if overlay_label is not None:
         command += ["-map", overlay_label]
-        if media.has_audio:
+        if media.has_audio and segment is None:
             command += ["-map", "0:a:0", "-c:a", "copy"]
         else:
             command += ["-an"]
+        if fps:
+            # Изходът иначе върви по честотата на източника и кадрите просто
+            # се дублират — за преглед това е излишна работа при декодиране.
+            command += ["-r", f"{rate:.6f}"]
         command += [
             "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
@@ -344,6 +379,30 @@ def pipe_frames(command: Sequence[str], frames: Iterator[bytes],
     if process.returncode != 0:
         tail = "\n".join((stderr or b"").decode("utf-8", "replace").strip().splitlines()[-25:])
         raise FFmpegError(f"ffmpeg се провали (код {process.returncode}):\n{tail}")
+
+
+def decode_rgb_frames(path: str | os.PathLike[str]) -> tuple[int, int, float, list[bytes]]:
+    """Декодира цял (кратък) файл в суров RGB за възпроизвеждане в прозорец.
+
+    Ползва се само за парчетата за преглед, затова всичко влиза в паметта:
+    270x480 при 12 к/с прави под 0.4 MB на кадър. За цяло видео това не е
+    подходящо и не бива да се вика с такова.
+    """
+    info = probe(path)
+    command = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", os.path.abspath(str(path)),
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+    ]
+    result = subprocess.run(command, capture_output=True)
+    if result.returncode != 0:
+        tail = result.stderr.decode("utf-8", "replace").strip().splitlines()[-5:]
+        raise FFmpegError("не мога да декодирам прегледа:\n" + "\n".join(tail))
+
+    size = info.width * info.height * 3
+    data = result.stdout
+    frames = [data[i:i + size] for i in range(0, len(data) - size + 1, size)]
+    return info.width, info.height, info.fps, frames
 
 
 def verify_alpha(path: str | os.PathLike[str]) -> tuple[bool, str]:
