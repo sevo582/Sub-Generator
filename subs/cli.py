@@ -17,7 +17,8 @@ from pathlib import Path
 
 from . import __version__
 from .burn import FFmpegError, LAYER_SUFFIX, ToolsMissing, check_tools, probe
-from .pipeline import build_blocks, check_fonts, load_words, render, save_words
+from .pipeline import (build_blocks, check_fonts, export_layers, load_words, render,
+                       save_words)
 from .styles import PRESETS, Style, apply_overrides, get_style, load_style_file
 from .transcribe import TranscribeOptions, transcribe
 
@@ -139,6 +140,22 @@ def build_parser() -> argparse.ArgumentParser:
                                    help="по подразбиране: <име>.words.json")
     add_transcribe_arguments(transcribe_parser)
 
+    # ---- layers ----
+    layers_parser = subparsers.add_parser(
+        "layers", help="изнася всяка дума като отделен прозрачен PNG за редактор")
+    layers_parser.add_argument("video", type=Path)
+    layers_parser.add_argument("--words", "-w", type=Path, required=True,
+                               help="JSON с думите")
+    layers_parser.add_argument("--style", "-s", default="stack",
+                               help=f"стилов пресет: {', '.join(sorted(PRESETS))}")
+    layers_parser.add_argument("--style-file", type=Path, default=None)
+    layers_parser.add_argument("--set", dest="overrides", action="append", default=[],
+                               metavar="ПЪТ=СТОЙНОСТ")
+    layers_parser.add_argument("--output", "-o", type=Path, default=None,
+                               metavar="ПАПКА",
+                               help="по подразбиране: <име>.layers/")
+    layers_parser.add_argument("--quiet", "-q", action="store_true")
+
     # ---- styles ----
     styles_parser = subparsers.add_parser("styles", help="изброява стиловите пресети")
     styles_parser.add_argument("--json", action="store_true",
@@ -187,6 +204,21 @@ def command_transcribe(args: argparse.Namespace) -> int:
     for note in transcript.notes:
         print(f"  {note}")
     print(f"{len(transcript.words)} думи → {output}")
+    return 0
+
+
+def command_layers(args: argparse.Namespace) -> int:
+    require_file(args.video, "видео файл")
+    require_file(args.words, "JSON с думи")
+    style = resolve_style(args)
+    say = (lambda message: None) if args.quiet else print
+
+    media = probe(args.video)
+    transcript = load_words(args.words)
+    destination = args.output or args.video.with_name(args.video.stem + ".layers")
+    say(f"изнасям думите на стил {style.name!r} в {destination} …")
+    export_layers(args.video, transcript, style, destination, media=media, progress=say)
+    print(f"готово: {destination}")
     return 0
 
 
@@ -320,6 +352,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "transcribe":
             check_tools()
             return command_transcribe(args)
+        if args.command == "layers":
+            check_tools()
+            return command_layers(args)
         if args.command == "styles":
             return command_styles(args)
     except ToolsMissing as error:

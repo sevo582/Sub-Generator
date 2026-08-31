@@ -39,6 +39,11 @@ PALETTE = ("#FFFFFF", "#FF3B30", "#FF9F0A", "#FFD60A",
 
 #: Преглед на парче: колко секунди и с каква едрина да се рендира. Малко
 #: и дребно нарочно — целта е да се види след секунди, не да е за качване.
+#: Граници и стъпка на ръчния размер. Под 0.4 думата става нечетима, над 3
+#: излиза извън всякакъв кадър.
+SCALE_RANGE = (0.4, 3.0)
+SCALE_STEP = 0.1
+
 PREVIEW_SECONDS = 3.0
 PREVIEW_HEIGHT = 480
 PREVIEW_FPS = 12.0
@@ -72,11 +77,13 @@ class Row:
     accent: bool = False
     color: str | None = None
     animation: str = "няма"
+    scale: float = 1.0
 
-    def values(self) -> tuple[str, str, str, str, str, str]:
+    def values(self) -> tuple[str, str, str, str, str, str, str]:
         marks = ("★" if self.emphasis else "") + ("●" if self.accent else "")
+        size = "—" if abs(self.scale - 1.0) < 1e-6 else f"{self.scale:.2f}×"
         return (self.text, format_time(self.start), format_time(self.end), marks,
-                self.color or "—", self.animation)
+                self.color or "—", self.animation, size)
 
     @property
     def middle(self) -> float:
@@ -85,13 +92,15 @@ class Row:
 
 
 def rows_from_transcript(transcript: Transcript) -> list[Row]:
-    return [Row(w.text, w.start, w.end, w.emphasis, w.accent, w.color, w.animation)
+    return [Row(w.text, w.start, w.end, w.emphasis, w.accent, w.color, w.animation,
+                w.scale)
             for w in transcript.words]
 
 
 def transcript_from_rows(rows: Iterable[Row], language: str | None,
                          notes: list[str] | None = None) -> Transcript:
-    words = [Word(r.text, r.start, r.end, r.emphasis, r.accent, r.color, r.animation)
+    words = [Word(r.text, r.start, r.end, r.emphasis, r.accent, r.color, r.animation,
+                  r.scale)
              for r in rows]
     return Transcript(words=words, language=language or "unknown",
                       notes=list(notes or []))
@@ -113,6 +122,13 @@ def validate(rows: list[Row]) -> list[str]:
         if following.start < current.end - 1e-6:
             problems.append(f"редове {index} и {index + 1} се застъпват във времето")
     return problems
+
+
+def stepped_scale(current: float, direction: int) -> float:
+    """Следващият размер нагоре или надолу, ограничен в разумното."""
+    low, high = SCALE_RANGE
+    value = round(current + direction * SCALE_STEP, 2)
+    return min(high, max(low, value))
 
 
 def preview_window(rows: list[Row], index: int, duration: float,

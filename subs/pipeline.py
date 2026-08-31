@@ -95,6 +95,25 @@ def check_fonts(transcript: Transcript, style: Style,
             warn(f"шрифтът {name} не покрива: {''.join(sorted(missing))}")
 
 
+def export_layers(
+    source: str | Path,
+    transcript: Transcript,
+    style: Style,
+    destination: Path,
+    media: MediaInfo | None = None,
+    progress: Callable[[str], None] = print,
+) -> list:
+    """Изнася всяка дума като отделен прозрачен PNG за редактор."""
+    from .export import export_words
+
+    info = media or probe(source)
+    blocks = build_blocks(transcript, style)
+    request = RenderRequest(source=Path(source), blocks=blocks, style=style,
+                            media=info, progress=progress)
+    layouts = get_renderer(style.renderer).layout(request)
+    return export_words(layouts, style, info, Path(destination), progress)
+
+
 def render(
     source: str | Path,
     transcript: Transcript,

@@ -195,10 +195,20 @@ def _wrap_stack_lines(
 
     while index < count:
         if index == block.highlight:
-            text = block.words[index].text
-            width = measurer.width(text, size_highlight)
-            lines.append(Line([index], size_highlight, width,
-                              size_highlight * style.line_gap))
+            word = block.words[index]
+            size = size_highlight * word.scale
+            lines.append(Line([index], size, measurer.width(word.text, size),
+                              size * style.line_gap))
+            index += 1
+            continue
+
+        # Ръчно уголемена дума не се събира с друга на реда: съседът до нея
+        # изглежда като грешка, също както при подчертаната.
+        if block.words[index].scale > 1.0:
+            word = block.words[index]
+            size = size_normal * word.scale
+            lines.append(Line([index], size, measurer.width(word.text, size),
+                              size * style.line_gap))
             index += 1
             continue
 
@@ -207,7 +217,8 @@ def _wrap_stack_lines(
         while (len(taken) < style.max_words_per_line
                and width < pair_limit
                and taken[-1] + 1 < count
-               and taken[-1] + 1 != block.highlight):
+               and taken[-1] + 1 != block.highlight
+               and block.words[taken[-1] + 1].scale == 1.0):
             candidate = taken + [taken[-1] + 1]
             text = " ".join(block.words[i].text for i in candidate)
             candidate_width = measurer.width(text, size_normal)
@@ -252,7 +263,9 @@ def layout_stack(
     previous_side = 0
 
     for line_index, line in enumerate(lines):
-        is_highlight_line = line.indices == [block.highlight]
+        is_highlight_line = (line.indices == [block.highlight]
+                             or (len(line.indices) == 1
+                                 and block.words[line.indices[0]].scale > 1.0))
         if is_highlight_line and line_index > 0:
             # Подчертаната дума стои точно под водещия си ред, не се мести
             # настрани — иначе връзката между двата реда се губи. Затова и
@@ -355,6 +368,9 @@ def layout_behind(
     key_text = key_word.text.upper() if style.uppercase_key else key_word.text
 
     key_size, key_width = _fit_key(key_text, style, key_measurer, video_w, video_h)
+    if key_word.scale != 1.0:
+        key_size *= key_word.scale
+        key_width = key_measurer.width(key_text, key_size)
 
     plain_size = style.size_plain * video_h
     before = [i for i in range(key_index) if i != key_index]
@@ -398,13 +414,14 @@ def layout_behind(
         cursor = x
         for i in indices:
             word = block.words[i]
-            word_width = plain_measurer.width(word.text, plain_size)
+            word_size = plain_size * word.scale
+            word_width = plain_measurer.width(word.text, word_size)
             placed.append(
                 Placed(
                     text=word.text,
                     x=cursor,
                     y=y_pos,
-                    size=plain_size,
+                    size=word_size,
                     kind="normal",
                     start=word.start,
                     end=word.end,
@@ -414,10 +431,10 @@ def layout_behind(
                     color=word.color,
                     animation=word.animation,
                     width=word_width,
-                    height=plain_size,
+                    height=word_size,
                 )
             )
-            cursor += word_width + plain_measurer.width(" ", plain_size)
+            cursor += word_width + plain_measurer.width(" ", word_size)
 
     if before:
         add_plain(before, y, "left")

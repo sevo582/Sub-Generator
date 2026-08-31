@@ -42,10 +42,17 @@ class Word:
     color: str | None = None
     #: Име от ``ANIMATIONS``. Непознато име се приема като „няма".
     animation: str = "няма"
+    #: Множител върху размера, който стилът дава на думата. 1.0 = както е
+    #: по стил; 1.5 я прави един и половина пъти по-едра.
+    scale: float = 1.0
 
     def __post_init__(self) -> None:
         if self.end < self.start:
             self.end = self.start
+        # Нула или отрицателен размер значи невидима дума; по-разумно е да
+        # се върне към нормалния, отколкото да изчезне без обяснение.
+        if not self.scale or self.scale <= 0:
+            self.scale = 1.0
 
     @property
     def duration(self) -> float:
@@ -65,6 +72,8 @@ class Word:
             data["color"] = self.color
         if self.animation and self.animation != "няма":
             data["animation"] = self.animation
+        if abs(self.scale - 1.0) > 1e-6:
+            data["scale"] = round(self.scale, 3)
         return data
 
     @classmethod
@@ -77,6 +86,7 @@ class Word:
             accent=bool(data.get("accent", False)),
             color=data.get("color") or None,
             animation=str(data.get("animation") or "няма"),
+            scale=float(data.get("scale") or 1.0),
         )
 
 

@@ -19,9 +19,10 @@ from .burn import MediaInfo, decode_rgb_frames, probe
 from .gui import (JSON_TYPES, LANGUAGES, MODELS, PALETTE, PREVIEW_FPS,
                   PREVIEW_HEIGHT, PREVIEW_SECONDS, Row, VIDEO_TYPES, Worker,
                   default_output, parse_time, preview_window, reveal,
-                  rows_from_transcript, transcript_from_rows, validate)
+                  rows_from_transcript, stepped_scale, transcript_from_rows,
+                  validate)
 from .models import ANIMATIONS
-from .pipeline import build_blocks, load_words, render, save_words
+from .pipeline import build_blocks, export_layers, load_words, render, save_words
 from .styles import PRESETS, get_style
 from .transcribe import TranscribeOptions, transcribe
 
@@ -32,7 +33,7 @@ class App(tk.Tk):
     def __init__(self, argv: list[str] | None = None) -> None:
         super().__init__()
         self.title("subs — анимирани субтитри")
-        self.geometry("1360x840")
+        self.geometry("1460x840")
         self.minsize(1080, 660)
 
         self.worker = Worker()
@@ -125,22 +126,38 @@ class App(tk.Tk):
         left = ttk.LabelFrame(pane, text="Думи — двоен клик за редакция", padding=4)
         pane.add(left, weight=3)
 
-        columns = ("text", "start", "end", "marks", "color", "anim")
-        self.tree = ttk.Treeview(left, columns=columns, show="tree headings",
+        # Подсказката и лентата с инструменти се създават преди таблицата:
+        # ``pack`` раздава мястото по реда на извикване, а таблицата е с
+        # ``expand=True`` и иначе не оставя нищо на подредените след нея.
+        ttk.Label(left, text="↑ ↓ между думите · Enter редактира · + − размер · "
+                             "★ ● с двоен клик · Delete маха цвета",
+                  foreground="#666").pack(side="bottom", fill="x", padx=4)
+        # Два реда: на един ред всичко това не се побира в панела и
+        # десният му край просто изчезва.
+        second = ttk.Frame(left)
+        second.pack(side="bottom", fill="x", pady=(2, 2))
+        tools = ttk.Frame(left)
+        tools.pack(side="bottom", fill="x", pady=(4, 0))
+        holder = ttk.Frame(left)
+        holder.pack(side="top", fill="both", expand=True)
+
+        columns = ("text", "start", "end", "marks", "color", "anim", "size")
+        self.tree = ttk.Treeview(holder, columns=columns, show="tree headings",
                                  selectmode="browse")
         for name, title in (("#0", "№"), ("text", "Дума"), ("start", "Начало"),
                             ("end", "Край"), ("marks", "★ ●"), ("color", "Цвят"),
-                            ("anim", "Анимация")):
+                            ("anim", "Анимация"), ("size", "Размер")):
             self.tree.heading(name, text=title)
         self.tree.column("#0", width=44, stretch=False, anchor="e")
         self.tree.column("text", width=190)
         self.tree.column("start", width=68, anchor="e", stretch=False)
         self.tree.column("end", width=68, anchor="e", stretch=False)
         self.tree.column("marks", width=48, anchor="center", stretch=False)
-        self.tree.column("color", width=84, anchor="center", stretch=False)
-        self.tree.column("anim", width=112, anchor="center", stretch=False)
+        self.tree.column("color", width=92, anchor="center", stretch=False)
+        self.tree.column("anim", width=150, anchor="w", stretch=False)
+        self.tree.column("size", width=76, anchor="e", stretch=False)
 
-        scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
+        scroll = ttk.Scrollbar(holder, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
@@ -149,9 +166,11 @@ class App(tk.Tk):
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Return>", self._edit_selected_text)
         self.tree.bind("<Delete>", lambda _e: self._set_color(None))
+        for key in ("<plus>", "<KP_Add>", "<equal>"):
+            self.tree.bind(key, lambda _e: self._step_scale(1))
+        for key in ("<minus>", "<KP_Subtract>"):
+            self.tree.bind(key, lambda _e: self._step_scale(-1))
 
-        tools = ttk.Frame(left)
-        tools.pack(side="bottom", fill="x", pady=(4, 0))
         ttk.Label(tools, text="Цвят:").pack(side="left", padx=(4, 2))
         for colour in PALETTE:
             swatch = tk.Button(tools, background=colour, width=2, relief="ridge",
@@ -163,17 +182,23 @@ class App(tk.Tk):
         ttk.Button(tools, text="Изчисти", width=8,
                    command=lambda: self._set_color(None)).pack(side="left")
 
-        ttk.Label(tools, text="Анимация:").pack(side="left", padx=(PAD, 2))
+        ttk.Label(second, text="Размер:").pack(side="left", padx=(4, 2))
+        ttk.Button(second, text="−", width=3,
+                   command=lambda: self._step_scale(-1)).pack(side="left")
+        ttk.Button(second, text="+", width=3,
+                   command=lambda: self._step_scale(1)).pack(side="left", padx=1)
+        ttk.Button(second, text="1×", width=4,
+                   command=lambda: self._set_scale(1.0)).pack(side="left")
+
+        ttk.Label(second, text="Анимация:").pack(side="left", padx=(PAD, 2))
         self.animation = tk.StringVar(value=ANIMATIONS[0])
-        animations = ttk.Combobox(tools, textvariable=self.animation, width=13,
+        # Ширината е в средни знаци, а кирилицата е по-широка от латиницата
+        # — с тясна кутия от „избледняване" се виждат две-три букви.
+        animations = ttk.Combobox(second, textvariable=self.animation, width=18,
                                   state="readonly", values=list(ANIMATIONS))
         animations.pack(side="left")
         animations.bind("<<ComboboxSelected>>",
                         lambda _e: self._set_animation(self.animation.get()))
-
-        ttk.Label(left, text="↑ ↓ между думите · Enter редактира · "
-                             "★ ● с двоен клик · Delete маха цвета",
-                  foreground="#666").pack(side="bottom", fill="x", padx=4)
 
         right = ttk.LabelFrame(pane, text="Преглед", padding=4)
         pane.add(right, weight=4)
@@ -199,7 +224,7 @@ class App(tk.Tk):
 
     def _place_sash(self, pane: ttk.PanedWindow) -> None:
         try:
-            pane.sashpos(0, 660)
+            pane.sashpos(0, 760)
         except tk.TclError:
             pass
 
@@ -213,6 +238,9 @@ class App(tk.Tk):
             frame, text="Само слой с прозрачност",
             command=lambda: self._render(layer_only=True))
         self.button_layer.pack(side="left", padx=PAD)
+        self.button_export = ttk.Button(frame, text="Думите поотделно (за редактор)",
+                                        command=self._export_layers)
+        self.button_export.pack(side="left")
         self.progress = ttk.Progressbar(frame, mode="indeterminate")
         self.progress.pack(side="left", fill="x", expand=True, padx=PAD)
 
@@ -238,7 +266,8 @@ class App(tk.Tk):
     def _busy(self, busy: bool, what: str = "") -> None:
         state = "disabled" if busy else "normal"
         for button in (self.button_transcribe, self.button_render,
-                       self.button_layer, self.button_preview, self.button_play):
+                       self.button_layer, self.button_preview, self.button_play,
+                       self.button_export):
             button.configure(state=state)
         if busy:
             self.progress.start(12)
@@ -393,6 +422,9 @@ class App(tk.Tk):
             self._log_blocks()
             return
 
+        if column == "#7":  # размерът се сменя с бутоните, не се пише
+            self._step_scale(1)
+            return
         field = {"#1": "text", "#2": "start", "#3": "end"}.get(column)
         if field is None:
             return
@@ -485,6 +517,17 @@ class App(tk.Tk):
                                        title="Цвят на думата")[1]
         if chosen:
             self._set_color(chosen.upper())
+
+    def _set_scale(self, value: float) -> None:
+        def change(row: Row) -> None:
+            row.scale = value
+        self._apply_to_selection(change)
+
+    def _step_scale(self, direction: int) -> str:
+        index = self._selected_index()
+        if index is not None:
+            self._set_scale(stepped_scale(self.rows[index].scale, direction))
+        return "break"
 
     def _set_animation(self, name: str) -> None:
         def change(row: Row) -> None:
@@ -615,6 +658,29 @@ class App(tk.Tk):
         self.worker.start(work)
         self.pending = ("preview", None)
 
+    def _export_layers(self) -> None:
+        """Изнася всяка дума като отделен прозрачен PNG за редактор."""
+        path = self._video_path()
+        if path is None or self.worker.busy:
+            return
+        if not self.rows:
+            messagebox.showinfo("Няма думи", "Първо транскрибирай или зареди JSON.")
+            return
+
+        style = get_style(self.style_name.get())
+        transcript = transcript_from_rows(self.rows, self._selected_language())
+        destination = path.with_name(path.stem + ".layers")
+        self.log(f"изнасям {len(self.rows)} думи в {destination.name} …")
+        self._busy(True, "Изнасям думите…")
+
+        def work(log: Callable[[str], None]) -> object:
+            export_layers(path, transcript, style, destination, media=self.media,
+                          progress=log)
+            return destination
+
+        self.worker.start(work)
+        self.pending = ("export", destination)
+
     def _render(self, layer_only: bool) -> None:
         path = self._video_path()
         if path is None or self.worker.busy:
@@ -680,6 +746,16 @@ class App(tk.Tk):
         outputs = getattr(result, "outputs", [])
         for note in getattr(result, "notes", []):
             self.log(note)
+        if what == "export":
+            destination = Path(result)
+            self.status.set("Думите са изнесени.")
+            self.log(f"готово: {destination}")
+            self.log("в редактора: внеси всички PNG-та — всяко ляга на мястото си; "
+                     "времената са в layers.csv")
+            if messagebox.askyesno("Готово", "Да отворя ли папката?"):
+                reveal(destination / "layers.csv")
+            return
+
         if what == "play":
             self._start_playback(result)
             self.status.set("Преглед — върти се в кръг, ■ спира.")
