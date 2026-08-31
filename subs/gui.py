@@ -133,14 +133,16 @@ def default_output(video: Path, style: str) -> Path:
 
 def reveal(path: Path) -> None:
     """Отваря папката на файла в системния файлов мениджър."""
+    from .burn import quiet
+
     path = Path(path)
     try:
         if sys.platform == "win32":
-            subprocess.run(["explorer", "/select,", str(path)], check=False)
+            subprocess.run(["explorer", "/select,", str(path)], **quiet(check=False))
         elif sys.platform == "darwin":
-            subprocess.run(["open", "-R", str(path)], check=False)
+            subprocess.run(["open", "-R", str(path)], **quiet(check=False))
         else:
-            subprocess.run(["xdg-open", str(path.parent)], check=False)
+            subprocess.run(["xdg-open", str(path.parent)], **quiet(check=False))
     except OSError:
         pass
 

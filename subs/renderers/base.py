@@ -32,7 +32,7 @@ class RenderRequest:
     layer: Path | None = None
     layer_format: str = "prores"
     crf: int = 18
-    preset: str = "medium"
+    preset: str = "veryfast"
     #: Моменти (в секунди), за които се иска само по един кадър вместо
     #: цяло видео. Итерирането по вида става за секунди, а не за минути.
     preview_times: list[float] = field(default_factory=list)

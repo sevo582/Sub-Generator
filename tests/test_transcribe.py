@@ -41,12 +41,20 @@ class FakeInfo:
 
 
 class FakeWhisperModel:
-    """Замества ``faster_whisper.WhisperModel``."""
+    """Замества ``faster_whisper.WhisperModel``.
+
+    Сигнатурата следва истинската — иначе тестът минава, а инструментът
+    гърми при първото истинско пускане.
+    """
 
     last_kwargs: dict = {}
+    last_init: dict = {}
 
-    def __init__(self, model, device=None, compute_type=None):
+    def __init__(self, model, device=None, compute_type=None, cpu_threads=None):
         self.model, self.device, self.compute_type = model, device, compute_type
+        FakeWhisperModel.last_init = {"model": model, "device": device,
+                                      "compute_type": compute_type,
+                                      "cpu_threads": cpu_threads}
 
     def transcribe(self, path, **kwargs):
         FakeWhisperModel.last_kwargs = kwargs
@@ -54,10 +62,32 @@ class FakeWhisperModel:
         return [FakeSegment(words)], FakeInfo()
 
 
+class FakeBatched:
+    """Замества ``faster_whisper.BatchedInferencePipeline``."""
+
+    used = False
+    fail = False
+
+    def __init__(self, model):
+        self.model = model
+
+    def transcribe(self, path, **kwargs):
+        FakeBatched.used = True
+        if FakeBatched.fail:
+            raise RuntimeError("батчовият режим се задави")
+        result = self.model.transcribe(
+            path, **{k: v for k, v in kwargs.items() if k != "batch_size"})
+        FakeWhisperModel.last_kwargs = kwargs  # след делегирането, не преди
+        return result
+
+
 @pytest.fixture
 def fake_faster_whisper(monkeypatch):
+    FakeBatched.used = False
+    FakeBatched.fail = False
     module = types.ModuleType("faster_whisper")
     module.WhisperModel = FakeWhisperModel
+    module.BatchedInferencePipeline = FakeBatched
     monkeypatch.setitem(sys.modules, "faster_whisper", module)
     monkeypatch.setattr(tr, "extract_audio", lambda source, destination: None)
     return module
@@ -144,6 +174,41 @@ def test_word_timestamps_are_always_requested(fake_faster_whisper, tmp_path):
     assert FakeWhisperModel.last_kwargs["word_timestamps"] is True
 
 
+def test_all_cores_are_used_by_default(fake_faster_whisper, tmp_path):
+    """ctranslate2 иначе се ограничава сам и на процесор това личи."""
+    import os
+
+    tr.transcribe(_touch(tmp_path), tr.TranscribeOptions(align=False))
+    assert FakeWhisperModel.last_init["cpu_threads"] == (os.cpu_count() or 4)
+
+
+def test_thread_count_can_be_set(fake_faster_whisper, tmp_path):
+    tr.transcribe(_touch(tmp_path), tr.TranscribeOptions(align=False, threads=2))
+    assert FakeWhisperModel.last_init["cpu_threads"] == 2
+
+
+def test_batched_mode_is_used_by_default(fake_faster_whisper, tmp_path):
+    result = tr.transcribe(_touch(tmp_path), tr.TranscribeOptions(align=False))
+    assert FakeBatched.used
+    assert FakeWhisperModel.last_kwargs["batch_size"] == 8
+    assert any("батчово" in note for note in result.notes)
+
+
+def test_batch_size_one_stays_sequential(fake_faster_whisper, tmp_path):
+    result = tr.transcribe(_touch(tmp_path),
+                           tr.TranscribeOptions(align=False, batch_size=1))
+    assert not FakeBatched.used
+    assert any("последователно" in note for note in result.notes)
+
+
+def test_batched_failure_falls_back_instead_of_losing_the_work(fake_faster_whisper,
+                                                               tmp_path):
+    FakeBatched.fail = True
+    result = tr.transcribe(_touch(tmp_path), tr.TranscribeOptions(align=False))
+    assert [w.text for w in result.words] == ["Тази", "програма"]
+    assert any("последователно" in note for note in result.notes)
+
+
 def test_missing_faster_whisper_gives_an_instruction(monkeypatch, tmp_path):
     monkeypatch.setattr(tr, "extract_audio", lambda source, destination: None)
     monkeypatch.setitem(sys.modules, "faster_whisper", None)
@@ -176,7 +241,19 @@ def test_failure_while_decoding_is_wrapped_too(fake_faster_whisper, monkeypatch,
 
     monkeypatch.setattr(FakeWhisperModel, "transcribe", explode)
     with pytest.raises(RuntimeError, match="разпознаването се провали"):
-        tr.transcribe(_touch(tmp_path), tr.TranscribeOptions(align=False))
+        tr.transcribe(_touch(tmp_path),
+                      tr.TranscribeOptions(align=False, batch_size=1))
+
+
+def test_empty_result_is_treated_as_failure(fake_faster_whisper, monkeypatch, tmp_path):
+    """Празен резултат от батчовия режим трябва да пусне последователния,
+    а не да върне нула думи."""
+    def nothing(self, path, **kwargs):
+        return [], FakeInfo()
+
+    monkeypatch.setattr(FakeBatched, "transcribe", nothing)
+    result = tr.transcribe(_touch(tmp_path), tr.TranscribeOptions(align=False))
+    assert [w.text for w in result.words] == ["Тази", "програма"]
 
 
 def test_missing_file_is_reported_before_any_model_is_loaded(tmp_path):

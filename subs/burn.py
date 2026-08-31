@@ -17,10 +17,31 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 from typing import Callable, Iterator, Sequence
+
+
+#: Windows отваря конзолен прозорец за всеки подпроцес, когато родителят е
+#: без конзола — тоест точно когато приложението върви през ``pythonw.exe``.
+#: При преглед, който вика ffmpeg на всяка смяна на дума, това мига по
+#: веднъж на редакция. ``CREATE_NO_WINDOW`` го спира.
+def no_window_flags(platform: str | None = None) -> dict[str, int]:
+    """Флаговете, които спират конзолния прозорец. Извън Windows — празно."""
+    if (platform or sys.platform) != "win32":
+        return {}
+    flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return {"creationflags": flag} if flag else {}
+
+
+NO_WINDOW: dict[str, int] = no_window_flags()
+
+
+def quiet(**kwargs: object) -> dict[str, object]:
+    """Аргументи за ``subprocess``, без изскачащ конзолен прозорец."""
+    return {**kwargs, **no_window_flags()}
 
 
 class FFmpegError(RuntimeError):
@@ -96,7 +117,7 @@ def probe(path: str | os.PathLike[str]) -> MediaInfo:
         "ffprobe", "-v", "error", "-print_format", "json",
         "-show_streams", "-show_format", str(path),
     ]
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, **quiet(capture_output=True, text=True))
     if result.returncode != 0:
         raise FFmpegError(f"ffprobe не можа да прочете {path}:\n{result.stderr.strip()}")
 
@@ -142,7 +163,7 @@ def probe(path: str | os.PathLike[str]) -> MediaInfo:
 
 def run(command: Sequence[str], cwd: str | os.PathLike[str] | None = None) -> None:
     """Пуска ffmpeg и вдига разбираема грешка при провал."""
-    result = subprocess.run(list(command), cwd=cwd, capture_output=True, text=True)
+    result = subprocess.run(list(command), **quiet(cwd=cwd, capture_output=True, text=True))
     if result.returncode != 0:
         tail = "\n".join(result.stderr.strip().splitlines()[-25:])
         raise FFmpegError(f"ffmpeg се провали (код {result.returncode}):\n{tail}")
@@ -170,7 +191,7 @@ def burn_ass(
     fonts_subdir: str,
     output: str | os.PathLike[str],
     crf: int = 18,
-    preset: str = "medium",
+    preset: str = "veryfast",
     segment: tuple[float, float] | None = None,
     scale_height: int | None = None,
     fps: float | None = None,
@@ -279,15 +300,23 @@ def build_raster_command(
     layer: str | os.PathLike[str] | None,
     layer_format: str = "prores",
     crf: int = 18,
-    preset: str = "medium",
+    preset: str = "veryfast",
     segment: tuple[float, float] | None = None,
     scale_height: int | None = None,
     fps: float | None = None,
+    overlay_size: tuple[int, int] | None = None,
+    overlay_origin: tuple[int, int] = (0, 0),
 ) -> list[str]:
     """Сглобява една ffmpeg команда с два изхода от един поток кадри.
 
     Кадрите влизат като суров RGBA през stdin. Ако се искат и двата изхода,
     потокът се разклонява с ``split`` — така рисуваме всеки кадър веднъж.
+
+    ``overlay_size`` позволява да се подава само правоъгълникът, в който
+    има текст, вместо цял кадър. При вертикално видео това е разликата
+    между 2.5 GB и 0.8 GB през тръбата за пет секунди. Слоят с алфа се
+    допълва обратно до пълен размер с ``pad``, за да остане годен за
+    внасяне в редактор.
     """
     if output is None and layer is None:
         raise ValueError("трябва поне един изход — готово видео или слой")
@@ -299,9 +328,10 @@ def build_raster_command(
     if segment is not None:
         command += ["-ss", f"{max(0.0, segment[0]):.3f}"]
     command += ["-i", os.path.abspath(str(source))]
+    frame_w, frame_h = overlay_size or (media.width, media.height)
     command += [
         "-f", "rawvideo", "-pixel_format", "rgba",
-        "-video_size", f"{media.width}x{media.height}",
+        "-video_size", f"{frame_w}x{frame_h}",
         "-framerate", f"{rate:.6f}",
         "-i", "-",
     ]
@@ -309,15 +339,22 @@ def build_raster_command(
         command += ["-t", f"{max(0.05, segment[1]):.3f}"]
 
     tail = f",scale=-2:{int(scale_height)}" if scale_height else ""
+    x, y = overlay_origin
+    place = f"overlay=x={x}:y={y}:format=auto:shortest=1"
+    # Слоят се връща до пълен кадър; иначе изнесеният файл щеше да е
+    # изрязан и нямаше да ляга върху оригинала в редактора.
+    grow = (f"pad={media.width}:{media.height}:{x}:{y}:color=0x00000000"
+            if overlay_size else "null")
+
     if output is not None and layer is not None:
-        graph = ("[1:v]split=2[lay][ovl];"
-                 f"[0:v][ovl]overlay=format=auto:shortest=1{tail}[comp]")
+        graph = (f"[1:v]split=2[lay0][ovl];[lay0]{grow}[lay];"
+                 f"[0:v][ovl]{place}{tail}[comp]")
         overlay_label, layer_label = "[comp]", "[lay]"
     elif output is not None:
-        graph = f"[0:v][1:v]overlay=format=auto:shortest=1{tail}[comp]"
+        graph = f"[0:v][1:v]{place}{tail}[comp]"
         overlay_label, layer_label = "[comp]", None
     else:
-        graph = "[1:v]null[lay]"
+        graph = f"[1:v]{grow}[lay]"
         overlay_label, layer_label = None, "[lay]"
     command += ["-filter_complex", graph]
 
@@ -353,8 +390,8 @@ def pipe_frames(command: Sequence[str], frames: Iterator[bytes],
     Ако ffmpeg падне рано, ``write`` вдига BrokenPipe — прихващаме го, за да
     покажем истинската причина от stderr, а не голия trace.
     """
-    process = subprocess.Popen(list(command), stdin=subprocess.PIPE,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    process = subprocess.Popen(list(command), **quiet(
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE))
     assert process.stdin is not None
     index = 0
     try:
@@ -394,7 +431,7 @@ def decode_rgb_frames(path: str | os.PathLike[str]) -> tuple[int, int, float, li
         "-i", os.path.abspath(str(path)),
         "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
     ]
-    result = subprocess.run(command, capture_output=True)
+    result = subprocess.run(command, **quiet(capture_output=True))
     if result.returncode != 0:
         tail = result.stderr.decode("utf-8", "replace").strip().splitlines()[-5:]
         raise FFmpegError("не мога да декодирам прегледа:\n" + "\n".join(tail))
@@ -417,7 +454,7 @@ def verify_alpha(path: str | os.PathLike[str]) -> tuple[bool, str]:
         "-show_entries", "stream=pix_fmt,codec_name:stream_tags=alpha_mode",
         "-print_format", "json", str(path),
     ]
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, **quiet(capture_output=True, text=True))
     if result.returncode != 0:
         return False, f"ffprobe не можа да прочете слоя: {result.stderr.strip()}"
     stream = json.loads(result.stdout)["streams"][0]

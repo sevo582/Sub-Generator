@@ -64,7 +64,12 @@ class TranscribeOptions:
     language: str | None = None
     device: str = "auto"
     compute_type: str | None = None
+    #: Батчов режим на faster-whisper. 1 изключва и минава на последователен.
+    #: На процесор разликата е забележима, защото парчетата се смятат
+    #: успоредно вместо едно по едно.
     batch_size: int = 8
+    #: Ядра за ctranslate2. None = всички, които машината има.
+    threads: int | None = None
     align: bool = True
     align_model: str | None = None
     initial_prompt: str | None = None
@@ -123,9 +128,11 @@ def _recognise(audio_path: Path, options: TranscribeOptions) -> Transcript:
 
     device, compute = resolve_device(options.device)
     compute = options.compute_type or compute
+    threads = options.threads or os.cpu_count() or 4
 
     try:
-        model = WhisperModel(options.model, device=device, compute_type=compute)
+        model = WhisperModel(options.model, device=device, compute_type=compute,
+                             cpu_threads=threads)
     except Exception as error:  # noqa: BLE001 — най-често мрежа или диск
         raise RuntimeError(
             f"моделът {options.model!r} не можа да се зареди: {error}\n"
@@ -134,29 +141,56 @@ def _recognise(audio_path: Path, options: TranscribeOptions) -> Transcript:
             "Провери мрежата, или пробвай по-малък модел с --model small."
         ) from error
 
+    batched = options.batch_size > 1
     try:
-        segments, info = model.transcribe(
-            str(audio_path),
-            language=options.language,
-            word_timestamps=True,
-            vad_filter=True,
-            beam_size=5,
-            initial_prompt=options.initial_prompt,
-        )
-
-        words: list[Word] = []
-        for segment in segments:  # генератор — работата се случва тук
-            for word in (segment.words or []):
-                text = word.word.strip()
-                if text:
-                    words.append(Word(text=text, start=float(word.start),
-                                      end=float(word.end)))
+        words, info = _decode(model, audio_path, options, batched)
     except Exception as error:  # noqa: BLE001
-        raise RuntimeError(f"разпознаването се провали: {error}") from error
+        if not batched:
+            raise RuntimeError(f"разпознаването се провали: {error}") from error
+        # Батчовият режим е по-нов и на места по-капризен. Пада се на
+        # последователния, вместо да се губи цялата работа.
+        try:
+            words, info = _decode(model, audio_path, options, batched=False)
+        except Exception as second:  # noqa: BLE001
+            raise RuntimeError(f"разпознаването се провали: {second}") from second
+        batched = False
 
     language = options.language or getattr(info, "language", None) or "unknown"
-    notes = [f"faster-whisper {options.model} на {device}/{compute}"]
+    how = f"батчово по {options.batch_size}" if batched else "последователно"
+    notes = [f"faster-whisper {options.model} на {device}/{compute}, "
+             f"{threads} нишки, {how}"]
     return Transcript(words=words, language=language, aligned=False, notes=notes)
+
+
+def _decode(model: object, audio_path: Path, options: TranscribeOptions,
+            batched: bool) -> tuple[list[Word], object]:
+    """Пуска разпознаването и събира думите с техните тайминги."""
+    engine = model
+    arguments: dict[str, object] = dict(
+        language=options.language,
+        word_timestamps=True,
+        vad_filter=True,
+        beam_size=5,
+        initial_prompt=options.initial_prompt,
+    )
+    if batched:
+        from faster_whisper import BatchedInferencePipeline
+
+        engine = BatchedInferencePipeline(model=model)
+        arguments["batch_size"] = options.batch_size
+
+    segments, info = engine.transcribe(str(audio_path), **arguments)
+
+    words: list[Word] = []
+    for segment in segments:  # генератор — работата се случва тук
+        for word in (segment.words or []):
+            text = word.word.strip()
+            if text:
+                words.append(Word(text=text, start=float(word.start),
+                                  end=float(word.end)))
+    if not words:
+        raise RuntimeError("нито една дума с тайминг")
+    return words, info
 
 
 def align_model_for(language: str,

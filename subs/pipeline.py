@@ -103,7 +103,7 @@ def render(
     layer: Path | None = None,
     layer_format: str = "prores",
     crf: int = 18,
-    preset: str = "medium",
+    preset: str = "veryfast",
     keep_dir: Path | None = None,
     dry_run: bool = False,
     progress: Callable[[str], None] = print,

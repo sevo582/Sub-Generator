@@ -37,6 +37,10 @@ from .base import RenderRequest, RenderResult, Renderer, preview_path, register
 #: Запас около мастилото, за да има място размазването на сянката.
 PAD = 8
 
+#: Допълнителен запас около правоъгълника, в който има текст. Покрива
+#: размазването на сянката и закръгленията при мащабиране.
+BBOX_MARGIN = 24
+
 
 def hex_rgb(value: str) -> tuple[int, int, int]:
     text = value.lstrip("#")
@@ -156,6 +160,44 @@ class RasterBehindRenderer(Renderer):
     # Рисуване
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _bbox(layouts: list[BlockLayout], style: BehindStyle,
+              media: MediaInfo) -> tuple[int, int, int, int]:
+        """Правоъгълникът, в който изобщо може да се появи текст.
+
+        Смята се веднъж за цялото видео и определя колко голям кадър се
+        подава на ffmpeg. Взима предвид най-големия мащаб, който думата ще
+        достигне, и отместването на „издигане", иначе краищата се режат.
+        """
+        left = top = float("inf")
+        right = bottom = float("-inf")
+        rise = style.rise_by * media.height
+        for layout in layouts:
+            for word in layout.placed:
+                grow = style.scale_end if word.kind == "highlight" else 1.0
+                half_w = word.width * grow / 2.0
+                half_h = word.height * grow / 2.0
+                centre_x = word.x + word.width / 2.0
+                centre_y = word.y + word.height / 2.0
+                left = min(left, centre_x - half_w)
+                right = max(right, centre_x + half_w)
+                top = min(top, centre_y - half_h - rise)
+                bottom = max(bottom, centre_y + half_h + rise)
+        if left > right:  # няма нито една дума
+            return 0, 0, media.width, media.height
+
+        left = max(0, int(left) - BBOX_MARGIN)
+        top = max(0, int(top) - BBOX_MARGIN)
+        right = min(media.width, int(right) + BBOX_MARGIN + 1)
+        bottom = min(media.height, int(bottom) + BBOX_MARGIN + 1)
+        # Четни размери и отмествания: кодеците и overlay се държат
+        # предвидимо само така.
+        left -= left % 2
+        top -= top % 2
+        width = min(media.width - left, (right - left + 1) // 2 * 2)
+        height = min(media.height - top, (bottom - top + 1) // 2 * 2)
+        return left, top, max(2, width), max(2, height)
+
     def _sprites(self, layouts: list[BlockLayout], style: BehindStyle) -> dict[int, Sprite]:
         """Една маска на дума, в максималния ѝ размер."""
         key_path = font_path(style.font_key)
@@ -176,23 +218,33 @@ class RasterBehindRenderer(Renderer):
 
     def _draw_frame(self, time: float, layouts: list[BlockLayout],
                     sprites: dict[int, Sprite], style: BehindStyle,
-                    media: MediaInfo) -> Image.Image | None:
+                    media: MediaInfo,
+                    region: tuple[int, int, int, int] | None = None
+                    ) -> Image.Image | None:
+        """Кадърът на слоя, или None ако в този момент няма нищо за рисуване.
+
+        ``region`` (x, y, ширина, височина) рисува само в изрязания
+        правоъгълник; координатите на думите се отместват съответно.
+        """
         active = [layout for layout in layouts if layout.appear <= time < layout.disappear]
         if not active:
             return None
 
-        canvas = Image.new("RGBA", (media.width, media.height), (0, 0, 0, 0))
+        origin_x, origin_y, width, height = region or (0, 0, media.width, media.height)
+        canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         drew = False
         for layout in active:
             for word in layout.placed:
                 if not (word.visible_from <= time < word.hidden_after):
                     continue
-                self._draw_word(canvas, time, word, sprites[id(word)], style, media)
+                self._draw_word(canvas, time, word, sprites[id(word)], style, media,
+                                origin_x, origin_y)
                 drew = True
         return canvas if drew else None
 
     def _draw_word(self, canvas: Image.Image, time: float, word: Placed,
-                   sprite: Sprite, style: BehindStyle, media: MediaInfo) -> None:
+                   sprite: Sprite, style: BehindStyle, media: MediaInfo,
+                   origin_x: int = 0, origin_y: int = 0) -> None:
         is_key = word.kind == "highlight"
 
         if is_key:
@@ -224,8 +276,8 @@ class RasterBehindRenderer(Renderer):
         # Центърът стои на място, растежът изтласква краищата извън кадъра.
         centre_x = word.x + word.width / 2.0
         centre_y = word.y + word.height / 2.0 + offset_y
-        x = round(centre_x - mask.width / 2.0)
-        y = round(centre_y - mask.height / 2.0)
+        x = round(centre_x - mask.width / 2.0) - origin_x
+        y = round(centre_y - mask.height / 2.0) - origin_y
 
         # Собственият цвят на думата бие цвета на стила.
         default = style.key_color if is_key else style.plain_color
@@ -245,19 +297,22 @@ class RasterBehindRenderer(Renderer):
     def _frames(self, layouts: list[BlockLayout], sprites: dict[int, Sprite],
                 style: BehindStyle, media: MediaInfo,
                 segment: tuple[float, float] | None = None,
-                fps: float | None = None) -> Iterator[bytes]:
+                fps: float | None = None,
+                region: tuple[int, int, int, int] | None = None) -> Iterator[bytes]:
         """Кадрите на слоя.
 
         При зададен сегмент се рисуват само тези във времевия прозорец, но
         с истинските времена — иначе анимациите биха тръгнали отначало и
         прегледът щеше да лъже.
         """
-        blank = Image.new("RGBA", (media.width, media.height), (0, 0, 0, 0)).tobytes()
+        size = (region[2], region[3]) if region else (media.width, media.height)
+        blank = Image.new("RGBA", size, (0, 0, 0, 0)).tobytes()
         rate = fps or media.fps
         offset = segment[0] if segment else 0.0
         count = (max(1, round(segment[1] * rate)) if segment else media.frame_count)
         for index in range(count):
-            frame = self._draw_frame(offset + index / rate, layouts, sprites, style, media)
+            frame = self._draw_frame(offset + index / rate, layouts, sprites, style,
+                                     media, region)
             yield blank if frame is None else frame.tobytes()
 
     # ------------------------------------------------------------------
@@ -329,12 +384,15 @@ class RasterBehindRenderer(Renderer):
                 layer = layer.with_suffix(expected)
                 result.notes.append(f"разширението на слоя е сменено на {expected}")
 
+        region = self._bbox(layouts, style, media)
         command = build_raster_command(request.source, media, request.output, layer,
                                        layer_format=request.layer_format,
                                        crf=request.crf, preset=request.preset,
                                        segment=request.segment,
                                        scale_height=request.scale_height,
-                                       fps=request.fps)
+                                       fps=request.fps,
+                                       overlay_size=(region[2], region[3]),
+                                       overlay_origin=(region[0], region[1]))
         result.commands.append(command)
         if request.dry_run:
             return result
@@ -356,8 +414,11 @@ class RasterBehindRenderer(Renderer):
                 request.progress(f"  кадър {index}/{total} ({percent}%)")
 
         request.progress(f"рисувам {total} кадъра …")
+        saved = 1.0 - (region[2] * region[3]) / (media.width * media.height)
+        request.progress(f"  слоят е {region[2]}x{region[3]} вместо "
+                         f"{media.width}x{media.height} ({saved:.0%} по-малко през тръбата)")
         pipe_frames(command, self._frames(layouts, sprites, style, media,
-                                          request.segment, request.fps), report)
+                                          request.segment, request.fps, region), report)
 
         if request.output is not None:
             result.outputs.append(request.output)

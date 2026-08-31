@@ -22,6 +22,15 @@ from .styles import PRESETS, Style, apply_overrides, get_style, load_style_file
 from .transcribe import TranscribeOptions, transcribe
 
 
+def _transcribe_options(args: argparse.Namespace) -> TranscribeOptions:
+    return TranscribeOptions(
+        model=args.model, language=args.language, device=args.device,
+        compute_type=args.compute_type, align=not args.no_align,
+        align_model=args.align_model, initial_prompt=args.initial_prompt,
+        batch_size=args.batch_size, threads=args.threads,
+    )
+
+
 def warn(message: str) -> None:
     print(f"внимание: {message}", file=sys.stderr)
 
@@ -52,6 +61,11 @@ def add_transcribe_arguments(parser: argparse.ArgumentParser) -> None:
                        help="wav2vec2 модел за подравняване; замества регистъра по език")
     group.add_argument("--initial-prompt", default=None,
                        help="подсказка към Whisper — помага за имена и термини")
+    group.add_argument("--batch-size", type=int, default=8,
+                       help="батчов режим на faster-whisper; 1 изключва "
+                            "(по подразбиране: 8)")
+    group.add_argument("--threads", type=int, default=None,
+                       help="ядра за смятането (по подразбиране: всички)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,7 +105,9 @@ def build_parser() -> argparse.ArgumentParser:
     render_parser.add_argument("--save-words", type=Path, default=None,
                                help="записва транскрипцията в JSON за ръчна поправка")
     render_parser.add_argument("--crf", type=int, default=18)
-    render_parser.add_argument("--preset", default="medium")
+    render_parser.add_argument("--preset", default="veryfast",
+                               help="пресет на x264: veryfast (по подразбиране) е "
+                                    "около 2.4 пъти по-бърз от medium при същото качество")
     render_parser.add_argument("--keep-intermediate", type=Path, default=None,
                                metavar="ПАПКА",
                                help="запазва .ass и другите междинни файлове")
@@ -164,11 +180,7 @@ def resolve_style(args: argparse.Namespace) -> Style:
 
 def command_transcribe(args: argparse.Namespace) -> int:
     require_file(args.video, "видео файл")
-    options = TranscribeOptions(
-        model=args.model, language=args.language, device=args.device,
-        compute_type=args.compute_type, align=not args.no_align,
-        align_model=args.align_model, initial_prompt=args.initial_prompt,
-    )
+    options = _transcribe_options(args)
     transcript = transcribe(args.video, options)
     output = args.output or args.video.with_suffix(".words.json")
     save_words(transcript, output)
@@ -216,11 +228,7 @@ def command_render(args: argparse.Namespace) -> int:
         transcript = load_words(args.words)
         say(f"думи от {args.words} ({len(transcript.words)})")
     else:
-        options = TranscribeOptions(
-            model=args.model, language=args.language, device=args.device,
-            compute_type=args.compute_type, align=not args.no_align,
-            align_model=args.align_model, initial_prompt=args.initial_prompt,
-        )
+        options = _transcribe_options(args)
         say("транскрибирам …")
         transcript = transcribe(args.video, options)
         for note in transcript.notes:

@@ -56,3 +56,55 @@ def test_side_data_without_rotation_is_skipped():
 ])
 def test_alpha_pixel_formats_are_recognised(pix_fmt, expected):
     assert pix_fmt.startswith(ALPHA_PIX_FMT_PREFIXES) is expected
+
+
+# --------------------------------------------------------------------------
+# Конзолният прозорец на Windows
+# --------------------------------------------------------------------------
+
+
+def test_no_window_flag_is_set_on_windows(monkeypatch):
+    """Приложението върви през pythonw.exe, тоест без конзола. Без този
+    флаг Windows отваря по един черен прозорец за всеки ffmpeg."""
+    import subprocess as sp
+
+    from subs.burn import no_window_flags
+
+    monkeypatch.setattr(sp, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    assert no_window_flags("win32") == {"creationflags": 0x08000000}
+
+
+def test_no_window_is_empty_elsewhere():
+    from subs.burn import no_window_flags
+
+    assert no_window_flags("linux") == {}
+    assert no_window_flags("darwin") == {}
+
+
+def test_quiet_adds_the_flags_of_the_running_platform(monkeypatch):
+    import subprocess as sp
+
+    from subs.burn import quiet
+
+    monkeypatch.setattr("subs.burn.sys.platform", "win32")
+    monkeypatch.setattr(sp, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    assert quiet(capture_output=True)["creationflags"] == 0x08000000
+
+
+def test_quiet_keeps_the_arguments_it_is_given():
+    from subs.burn import quiet
+
+    assert quiet(cwd="/тук", text=True)["cwd"] == "/тук"
+
+
+def test_every_subprocess_call_goes_through_quiet():
+    """Пропуснато извикване значи мигащ прозорец при точно това действие —
+    най-лесно се пропуска при добавяне на нова команда."""
+    import pathlib
+    import re
+
+    source = pathlib.Path("subs/burn.py").read_text(encoding="utf-8")
+    calls = re.findall(r"subprocess\.(?:run|Popen)\((.{0,120})", source, re.DOTALL)
+    assert calls, "очаквахме поне едно извикване"
+    for call in calls:
+        assert "quiet(" in call, f"без quiet(): {call[:60]!r}"

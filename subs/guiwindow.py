@@ -575,7 +575,8 @@ class App(tk.Tk):
         if path is None or self.worker.busy:
             return
         options = TranscribeOptions(model=self.model.get(),
-                                    language=self._selected_language())
+                                    language=self._selected_language(),
+                                    batch_size=8)
         self.log(f"транскрибирам с {options.model!r} … първото пускане тегли модела")
         self._busy(True, "Транскрибиране…")
 
