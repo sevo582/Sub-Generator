@@ -19,6 +19,7 @@ from . import __version__
 from .burn import FFmpegError, LAYER_SUFFIX, ToolsMissing, check_tools, probe
 from .pipeline import (build_blocks, check_fonts, export_layers, load_words, render,
                        save_words)
+from .export import FORMATS
 from .styles import PRESETS, Style, apply_overrides, get_style, load_style_file
 from .transcribe import TranscribeOptions, transcribe
 
@@ -151,6 +152,14 @@ def build_parser() -> argparse.ArgumentParser:
     layers_parser.add_argument("--style-file", type=Path, default=None)
     layers_parser.add_argument("--set", dest="overrides", action="append", default=[],
                                metavar="ПЪТ=СТОЙНОСТ")
+    layers_parser.add_argument("--format", "-f", dest="fmt", default="png",
+                               choices=FORMATS,
+                               help="png (по подразбиране) или pdf; и двата "
+                                    "носят прозрачност")
+    layers_parser.add_argument("--background", "-b", default="прозрачен",
+                               metavar="ФОН",
+                               help="прозрачен (по подразбиране), зелен за "
+                                    "хромакей, или #RRGGBB")
     layers_parser.add_argument("--output", "-o", type=Path, default=None,
                                metavar="ПАПКА",
                                help="по подразбиране: <име>.layers/")
@@ -216,8 +225,10 @@ def command_layers(args: argparse.Namespace) -> int:
     media = probe(args.video)
     transcript = load_words(args.words)
     destination = args.output or args.video.with_name(args.video.stem + ".layers")
-    say(f"изнасям думите на стил {style.name!r} в {destination} …")
-    export_layers(args.video, transcript, style, destination, media=media, progress=say)
+    say(f"изнасям думите на стил {style.name!r} като {args.fmt.upper()} "
+        f"с {args.background} фон в {destination} …")
+    export_layers(args.video, transcript, style, destination, media=media,
+                  fmt=args.fmt, background=args.background, progress=say)
     print(f"готово: {destination}")
     return 0
 

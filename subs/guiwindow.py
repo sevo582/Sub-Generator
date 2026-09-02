@@ -16,10 +16,11 @@ from typing import Callable
 from PIL import Image, ImageTk
 
 from .burn import MediaInfo, decode_rgb_frames, probe
+from .export import BACKGROUNDS, FORMATS
 from .gui import (JSON_TYPES, LANGUAGES, MODELS, PALETTE, PREVIEW_FPS,
                   PREVIEW_HEIGHT, PREVIEW_SECONDS, Row, VIDEO_TYPES, Worker,
                   default_output, parse_time, preview_window, reveal,
-                  rows_from_transcript, stepped_scale, transcript_from_rows,
+                  nudged, rows_from_transcript, stepped_scale, transcript_from_rows,
                   validate)
 from .models import ANIMATIONS
 from .pipeline import build_blocks, export_layers, load_words, render, save_words
@@ -33,7 +34,7 @@ class App(tk.Tk):
     def __init__(self, argv: list[str] | None = None) -> None:
         super().__init__()
         self.title("subs — анимирани субтитри")
-        self.geometry("1460x840")
+        self.geometry("1560x860")
         self.minsize(1080, 660)
 
         self.worker = Worker()
@@ -50,6 +51,8 @@ class App(tk.Tk):
         self.preview_at = tk.StringVar(value="2.50")
         self.status = tk.StringVar(value="Избери видео, за да започнеш.")
         self.follow = tk.BooleanVar(value=True)
+        self.export_format = tk.StringVar(value=FORMATS[0])
+        self.export_background = tk.StringVar(value=BACKGROUNDS[0])
 
         #: Кадри на пуснатото парче и докъде е стигнало възпроизвеждането.
         self.play_frames: list[ImageTk.PhotoImage] = []
@@ -130,7 +133,7 @@ class App(tk.Tk):
         # ``pack`` раздава мястото по реда на извикване, а таблицата е с
         # ``expand=True`` и иначе не оставя нищо на подредените след нея.
         ttk.Label(left, text="↑ ↓ между думите · Enter редактира · + − размер · "
-                             "★ ● с двоен клик · Delete маха цвета",
+                             "★ ● с двоен клик · Shift+стрелки мести · Delete маха цвета",
                   foreground="#666").pack(side="bottom", fill="x", padx=4)
         # Два реда: на един ред всичко това не се побира в панела и
         # десният му край просто изчезва.
@@ -141,12 +144,13 @@ class App(tk.Tk):
         holder = ttk.Frame(left)
         holder.pack(side="top", fill="both", expand=True)
 
-        columns = ("text", "start", "end", "marks", "color", "anim", "size")
+        columns = ("text", "start", "end", "marks", "color", "anim", "size", "offset")
         self.tree = ttk.Treeview(holder, columns=columns, show="tree headings",
                                  selectmode="browse")
         for name, title in (("#0", "№"), ("text", "Дума"), ("start", "Начало"),
                             ("end", "Край"), ("marks", "★ ●"), ("color", "Цвят"),
-                            ("anim", "Анимация"), ("size", "Размер")):
+                            ("anim", "Анимация"), ("size", "Размер"),
+                            ("offset", "Място")):
             self.tree.heading(name, text=title)
         self.tree.column("#0", width=44, stretch=False, anchor="e")
         self.tree.column("text", width=190)
@@ -156,6 +160,7 @@ class App(tk.Tk):
         self.tree.column("color", width=92, anchor="center", stretch=False)
         self.tree.column("anim", width=150, anchor="w", stretch=False)
         self.tree.column("size", width=76, anchor="e", stretch=False)
+        self.tree.column("offset", width=96, anchor="e", stretch=False)
 
         scroll = ttk.Scrollbar(holder, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
@@ -170,6 +175,10 @@ class App(tk.Tk):
             self.tree.bind(key, lambda _e: self._step_scale(1))
         for key in ("<minus>", "<KP_Subtract>"):
             self.tree.bind(key, lambda _e: self._step_scale(-1))
+        # Стрелките сами местят избора; със Shift местят самата дума.
+        for key, right, down in (("<Shift-Left>", -1, 0), ("<Shift-Right>", 1, 0),
+                                 ("<Shift-Up>", 0, -1), ("<Shift-Down>", 0, 1)):
+            self.tree.bind(key, lambda _e, r=right, d=down: self._nudge(r, d))
 
         ttk.Label(tools, text="Цвят:").pack(side="left", padx=(4, 2))
         for colour in PALETTE:
@@ -189,6 +198,14 @@ class App(tk.Tk):
                    command=lambda: self._step_scale(1)).pack(side="left", padx=1)
         ttk.Button(second, text="1×", width=4,
                    command=lambda: self._set_scale(1.0)).pack(side="left")
+
+        ttk.Label(second, text="Място:").pack(side="left", padx=(PAD, 2))
+        for label, right, down in (("◀", -1, 0), ("▲", 0, -1), ("▼", 0, 1), ("▶", 1, 0)):
+            ttk.Button(second, text=label, width=3,
+                       command=lambda r=right, d=down: self._nudge(r, d)
+                       ).pack(side="left", padx=1)
+        ttk.Button(second, text="⌂", width=3,
+                   command=lambda: self._set_offset(0.0, 0.0)).pack(side="left", padx=1)
 
         ttk.Label(second, text="Анимация:").pack(side="left", padx=(PAD, 2))
         self.animation = tk.StringVar(value=ANIMATIONS[0])
@@ -224,7 +241,7 @@ class App(tk.Tk):
 
     def _place_sash(self, pane: ttk.PanedWindow) -> None:
         try:
-            pane.sashpos(0, 760)
+            pane.sashpos(0, 860)
         except tk.TclError:
             pass
 
@@ -238,9 +255,14 @@ class App(tk.Tk):
             frame, text="Само слой с прозрачност",
             command=lambda: self._render(layer_only=True))
         self.button_layer.pack(side="left", padx=PAD)
-        self.button_export = ttk.Button(frame, text="Думите поотделно (за редактор)",
+        self.button_export = ttk.Button(frame, text="Думите поотделно",
                                         command=self._export_layers)
         self.button_export.pack(side="left")
+        ttk.Combobox(frame, textvariable=self.export_format, width=6, state="readonly",
+                     values=list(FORMATS)).pack(side="left", padx=(4, 2))
+        ttk.Combobox(frame, textvariable=self.export_background, width=12,
+                     state="readonly", values=list(BACKGROUNDS)
+                     ).pack(side="left", padx=(0, PAD))
         self.progress = ttk.Progressbar(frame, mode="indeterminate")
         self.progress.pack(side="left", fill="x", expand=True, padx=PAD)
 
@@ -371,10 +393,15 @@ class App(tk.Tk):
         self.tree.delete(*self.tree.get_children())
         for index, row in enumerate(self.rows):
             self.tree.insert("", "end", iid=str(index), text=str(index + 1),
-                             values=row.values(), tags=self._tag_for(row))
+                             values=row.values(self._height()),
+                             tags=self._tag_for(row))
         if self.rows:
             self.tree.selection_set("0")
             self.tree.focus("0")
+
+    def _height(self) -> int:
+        """Височината на кадъра — отместванията се показват в нейни пиксели."""
+        return self.media.height if self.media else 1920
 
     def _tag_for(self, row: Row) -> tuple[str, ...]:
         """Оцветява реда в цвета на думата — вижда се, без да се чете кодът."""
@@ -386,7 +413,8 @@ class App(tk.Tk):
 
     def _refresh_row(self, index: int) -> None:
         row = self.rows[index]
-        self.tree.item(str(index), values=row.values(), tags=self._tag_for(row))
+        self.tree.item(str(index), values=row.values(self._height()),
+                       tags=self._tag_for(row))
 
     def _log_blocks(self) -> None:
         """Показва как ще се разбият блоковете и коя дума е подчертана."""
@@ -529,6 +557,18 @@ class App(tk.Tk):
             self._set_scale(stepped_scale(self.rows[index].scale, direction))
         return "break"
 
+    def _set_offset(self, dx: float, dy: float) -> None:
+        def change(row: Row) -> None:
+            row.dx, row.dy = dx, dy
+        self._apply_to_selection(change)
+
+    def _nudge(self, right: int, down: int) -> str:
+        index = self._selected_index()
+        if index is not None:
+            row = self.rows[index]
+            self._set_offset(*nudged(row.dx, row.dy, right, down))
+        return "break"
+
     def _set_animation(self, name: str) -> None:
         def change(row: Row) -> None:
             row.animation = name
@@ -669,13 +709,16 @@ class App(tk.Tk):
 
         style = get_style(self.style_name.get())
         transcript = transcript_from_rows(self.rows, self._selected_language())
+        fmt = self.export_format.get()
+        background = self.export_background.get()
         destination = path.with_name(path.stem + ".layers")
-        self.log(f"изнасям {len(self.rows)} думи в {destination.name} …")
+        self.log(f"изнасям {len(self.rows)} думи като {fmt.upper()} "
+                 f"с {background} фон в {destination.name} …")
         self._busy(True, "Изнасям думите…")
 
         def work(log: Callable[[str], None]) -> object:
             export_layers(path, transcript, style, destination, media=self.media,
-                          progress=log)
+                          fmt=fmt, background=background, progress=log)
             return destination
 
         self.worker.start(work)

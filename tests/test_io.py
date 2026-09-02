@@ -185,3 +185,18 @@ def test_unknown_animation_falls_back_to_none(tmp_path):
     path = tmp_path / "w.json"
     write(path, {"words": [{"text": "а", "start": 0, "end": 1, "animation": ""}]})
     assert load_words(path).words[0].animation == "няма"
+
+
+def test_offset_is_written_and_read(tmp_path):
+    path = tmp_path / "w.json"
+    save_words(Transcript(words=[Word("дума", 0, 1, dx=0.04, dy=-0.01)],
+                          language="bg"), path)
+    assert "offset" in path.read_text(encoding="utf-8")
+    word = load_words(path).words[0]
+    assert word.dx == pytest.approx(0.04) and word.dy == pytest.approx(-0.01)
+
+
+def test_zero_offset_is_not_written(tmp_path):
+    path = tmp_path / "w.json"
+    save_words(Transcript(words=[Word("дума", 0, 1)], language="bg"), path)
+    assert "offset" not in path.read_text(encoding="utf-8")

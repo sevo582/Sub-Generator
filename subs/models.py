@@ -45,6 +45,12 @@ class Word:
     #: Множител върху размера, който стилът дава на думата. 1.0 = както е
     #: по стил; 1.5 я прави един и половина пъти по-едра.
     scale: float = 1.0
+    #: Ръчно отместване от мястото, което оформлението ѝ дава. И двете са
+    #: дроби от **височината** на кадъра — нарочно и за двете оси, за да е
+    #: стъпката еднаква нагоре-надолу и настрани, и за да работи един и същ
+    #: JSON на 1080x1920 и на 720x1280.
+    dx: float = 0.0
+    dy: float = 0.0
 
     def __post_init__(self) -> None:
         if self.end < self.start:
@@ -74,6 +80,8 @@ class Word:
             data["animation"] = self.animation
         if abs(self.scale - 1.0) > 1e-6:
             data["scale"] = round(self.scale, 3)
+        if abs(self.dx) > 1e-9 or abs(self.dy) > 1e-9:
+            data["offset"] = {"dx": round(self.dx, 5), "dy": round(self.dy, 5)}
         return data
 
     @classmethod
@@ -87,6 +95,8 @@ class Word:
             color=data.get("color") or None,
             animation=str(data.get("animation") or "няма"),
             scale=float(data.get("scale") or 1.0),
+            dx=float((data.get("offset") or {}).get("dx") or 0.0),
+            dy=float((data.get("offset") or {}).get("dy") or 0.0),
         )
 
 

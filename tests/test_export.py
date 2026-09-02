@@ -200,3 +200,80 @@ def test_render_word_does_not_need_a_file_on_disk():
     image, box = render_word(word, style, MEDIA)
     assert image.size == (MEDIA.width, MEDIA.height)
     assert box[2] > 0 and box[3] > 0
+
+
+# --------------------------------------------------------------------------
+# Формат и фон
+# --------------------------------------------------------------------------
+
+
+def test_background_names_resolve():
+    from subs.export import CHROMA_GREEN, resolve_background
+    from subs.raster import hex_rgb
+
+    assert resolve_background(None) is None
+    assert resolve_background("прозрачен") is None
+    assert resolve_background("зелен") == hex_rgb(CHROMA_GREEN)
+    assert resolve_background("#123456") == (0x12, 0x34, 0x56)
+
+
+def test_unknown_background_is_reported():
+    from subs.export import resolve_background
+
+    with pytest.raises(ValueError, match="прозрачен"):
+        resolve_background("морав")
+
+
+def test_unknown_format_is_reported(tmp_path):
+    layouts, style = layouts_for("stack", sample_words())
+    with pytest.raises(ValueError, match="png"):
+        export_words(layouts, style, MEDIA, tmp_path, fmt="tiff",
+                     progress=lambda _m: None)
+
+
+def test_green_background_fills_the_frame(tmp_path):
+    from subs.export import CHROMA_GREEN
+    from subs.raster import hex_rgb
+
+    layouts, style = layouts_for("stack", sample_words())
+    exported = export_words(layouts, style, MEDIA, tmp_path, background="зелен",
+                            progress=lambda _m: None)
+    image = Image.open(tmp_path / exported[0].file).convert("RGBA")
+    assert image.getpixel((5, 5)) == hex_rgb(CHROMA_GREEN) + (255,)
+
+
+def test_transparent_stays_transparent(tmp_path):
+    layouts, style = layouts_for("stack", sample_words())
+    exported = export_words(layouts, style, MEDIA, tmp_path, progress=lambda _m: None)
+    image = Image.open(tmp_path / exported[0].file).convert("RGBA")
+    assert image.getpixel((5, 5))[3] == 0
+
+
+def test_pdf_files_are_written(tmp_path):
+    layouts, style = layouts_for("stack", sample_words())
+    exported = export_words(layouts, style, MEDIA, tmp_path, fmt="pdf",
+                            progress=lambda _m: None)
+    for word in exported:
+        assert word.file.endswith(".pdf")
+        assert (tmp_path / word.file).read_bytes().startswith(b"%PDF")
+
+
+def test_manifest_records_format_and_background(tmp_path):
+    layouts, style = layouts_for("stack", sample_words())
+    export_words(layouts, style, MEDIA, tmp_path, fmt="pdf", background="зелен",
+                 progress=lambda _m: None)
+    data = json.loads((tmp_path / "layers.json").read_text(encoding="utf-8"))
+    assert data["format"] == "pdf"
+    assert data["background"] == "#00B140"
+    assert "хромакей" in data["note"], "плътният фон трябва да е обяснен"
+
+
+def test_offset_moves_the_exported_word(tmp_path):
+    words = sample_words()
+    plain, style = layouts_for("stack", words)
+    words[0].dx, words[0].dy = 0.05, 0.02
+    moved, _ = layouts_for("stack", words)
+    a = export_words(plain, style, MEDIA, tmp_path / "a", progress=lambda _m: None)[0]
+    b = export_words(moved, style, MEDIA, tmp_path / "b", progress=lambda _m: None)[0]
+    assert b.x - a.x == pytest.approx(0.05 * MEDIA.height, abs=2)
+    assert b.y - a.y == pytest.approx(0.02 * MEDIA.height, abs=2)

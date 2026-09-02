@@ -44,6 +44,11 @@ PALETTE = ("#FFFFFF", "#FF3B30", "#FF9F0A", "#FFD60A",
 SCALE_RANGE = (0.4, 3.0)
 SCALE_STEP = 0.1
 
+#: Стъпка при местене на дума, дроб от височината на кадъра. При 1920 това
+#: е около 10 пиксела — достатъчно, за да се усети, и достатъчно фино, за да
+#: се уцели. Едно и също и за двете оси, за да е движението равномерно.
+NUDGE_STEP = 0.005
+
 PREVIEW_SECONDS = 3.0
 PREVIEW_HEIGHT = 480
 PREVIEW_FPS = 12.0
@@ -78,12 +83,24 @@ class Row:
     color: str | None = None
     animation: str = "няма"
     scale: float = 1.0
+    dx: float = 0.0
+    dy: float = 0.0
 
-    def values(self) -> tuple[str, str, str, str, str, str, str]:
+    def values(self, height: int = 1920) -> tuple[str, ...]:
+        """Редът, както се вижда в таблицата.
+
+        Отместването се пази като дроб от височината, за да работи един и
+        същи JSON на различни резолюции, но се показва в пиксели — човек
+        мисли в пиксели, не в дроби.
+        """
         marks = ("★" if self.emphasis else "") + ("●" if self.accent else "")
         size = "—" if abs(self.scale - 1.0) < 1e-6 else f"{self.scale:.2f}×"
+        if abs(self.dx) < 1e-9 and abs(self.dy) < 1e-9:
+            offset = "—"
+        else:
+            offset = f"{round(self.dx * height):+d}, {round(self.dy * height):+d}"
         return (self.text, format_time(self.start), format_time(self.end), marks,
-                self.color or "—", self.animation, size)
+                self.color or "—", self.animation, size, offset)
 
     @property
     def middle(self) -> float:
@@ -93,14 +110,14 @@ class Row:
 
 def rows_from_transcript(transcript: Transcript) -> list[Row]:
     return [Row(w.text, w.start, w.end, w.emphasis, w.accent, w.color, w.animation,
-                w.scale)
+                w.scale, w.dx, w.dy)
             for w in transcript.words]
 
 
 def transcript_from_rows(rows: Iterable[Row], language: str | None,
                          notes: list[str] | None = None) -> Transcript:
     words = [Word(r.text, r.start, r.end, r.emphasis, r.accent, r.color, r.animation,
-                  r.scale)
+                  r.scale, r.dx, r.dy)
              for r in rows]
     return Transcript(words=words, language=language or "unknown",
                       notes=list(notes or []))
@@ -129,6 +146,11 @@ def stepped_scale(current: float, direction: int) -> float:
     low, high = SCALE_RANGE
     value = round(current + direction * SCALE_STEP, 2)
     return min(high, max(low, value))
+
+
+def nudged(dx: float, dy: float, right: int, down: int) -> tuple[float, float]:
+    """Отместването след едно побутване в дадената посока."""
+    return (round(dx + right * NUDGE_STEP, 5), round(dy + down * NUDGE_STEP, 5))
 
 
 def preview_window(rows: list[Row], index: int, duration: float,

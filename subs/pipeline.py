@@ -101,9 +101,11 @@ def export_layers(
     style: Style,
     destination: Path,
     media: MediaInfo | None = None,
+    fmt: str = "png",
+    background: str | None = None,
     progress: Callable[[str], None] = print,
 ) -> list:
-    """Изнася всяка дума като отделен прозрачен PNG за редактор."""
+    """Изнася всяка дума като отделен файл за редактор."""
     from .export import export_words
 
     info = media or probe(source)
@@ -111,7 +113,8 @@ def export_layers(
     request = RenderRequest(source=Path(source), blocks=blocks, style=style,
                             media=info, progress=progress)
     layouts = get_renderer(style.renderer).layout(request)
-    return export_words(layouts, style, info, Path(destination), progress)
+    return export_words(layouts, style, info, Path(destination), fmt, background,
+                        progress)
 
 
 def render(

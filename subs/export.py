@@ -29,9 +29,19 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from .burn import MediaInfo
 from .models import BlockLayout, Placed
+from .pdfwrite import write_rgba_pdf
 from .raster import Sprite, composite, hex_rgb
 from .styles import BehindStyle, ShadowSpec, StackStyle, Style
 from .textmetrics import font_path
+
+#: Формати на изнесените файлове.
+FORMATS: tuple[str, ...] = ("png", "pdf")
+
+#: Класическото хромакей зелено. Приема се и произволен ``#RRGGBB``.
+CHROMA_GREEN = "#00B140"
+
+#: Имена на фоновете, които се пишат на командния ред.
+BACKGROUNDS: tuple[str, ...] = ("прозрачен", "зелен")
 
 
 @dataclass
@@ -67,13 +77,46 @@ class ExportedWord:
         }
 
 
-def safe_name(text: str, index: int) -> str:
+def safe_name(text: str, index: int, suffix: str = "png") -> str:
     """Име на файл, което Windows приема, без да губи коя е думата."""
     cleaned = "".join(
         char for char in unicodedata.normalize("NFC", text)
         if char.isalnum() or char in " -_"
     ).strip().replace(" ", "_")
-    return f"{index:03d}-{cleaned[:40] or 'дума'}.png"
+    return f"{index:03d}-{cleaned[:40] or 'дума'}.{suffix}"
+
+
+def resolve_background(name: str | None) -> tuple[int, int, int] | None:
+    """Превръща името на фона в цвят. ``None`` значи прозрачен.
+
+    Приема ``прозрачен``/``transparent``, ``зелен``/``green`` и произволен
+    ``#RRGGBB``.
+    """
+    if not name or name in ("прозрачен", "transparent", "none"):
+        return None
+    if name in ("зелен", "green"):
+        return hex_rgb(CHROMA_GREEN)
+    if name.startswith("#"):
+        return hex_rgb(name)
+    raise ValueError(
+        f"непознат фон {name!r}; налични: прозрачен, зелен или #RRGGBB")
+
+
+def flatten(image: Image.Image, background: tuple[int, int, int] | None
+            ) -> Image.Image:
+    """Слага фон под думата, ако е поискан такъв."""
+    if background is None:
+        return image
+    plate = Image.new("RGBA", image.size, background + (255,))
+    return Image.alpha_composite(plate, image)
+
+
+def save_layer(image: Image.Image, path: Path, fmt: str) -> None:
+    """Записва слоя. PDF-ът носи истинска прозрачност — виж ``pdfwrite``."""
+    if fmt == "pdf":
+        write_rgba_pdf(image, path)
+    else:
+        image.save(path, "PNG")
 
 
 def _word_settings(style: Style, word: Placed) -> tuple[str, str, float, ShadowSpec,
@@ -142,9 +185,14 @@ def render_word(word: Placed, style: Style, media: MediaInfo) -> tuple[Image.Ima
 
 
 def export_words(layouts: list[BlockLayout], style: Style, media: MediaInfo,
-                 destination: Path,
+                 destination: Path, fmt: str = "png",
+                 background: str | None = None,
                  progress: Callable[[str], None] = print) -> list[ExportedWord]:
-    """Изнася всяка дума като отделен PNG и описва резултата."""
+    """Изнася всяка дума като отделен файл и описва резултата."""
+    if fmt not in FORMATS:
+        raise ValueError(f"непознат формат {fmt!r}; налични: {', '.join(FORMATS)}")
+    plate = resolve_background(background)
+
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
 
@@ -154,8 +202,9 @@ def export_words(layouts: list[BlockLayout], style: Style, media: MediaInfo,
         for word in layout.placed:
             index += 1
             image, box = render_word(word, style, media)
-            name = safe_name(word.text, index)
-            image.save(destination / name)
+            image = flatten(image, plate)
+            name = safe_name(word.text, index, fmt)
+            save_layer(image, destination / name, fmt)
             exported.append(ExportedWord(
                 index=index, text=word.text, start=word.visible_from,
                 end=word.hidden_after, spoken_start=word.start, spoken_end=word.end,
@@ -163,21 +212,29 @@ def export_words(layouts: list[BlockLayout], style: Style, media: MediaInfo,
             if index % 10 == 0:
                 progress(f"  {index} думи …")
 
-    write_manifest(exported, style, media, destination)
+    write_manifest(exported, style, media, destination, fmt, plate)
     progress(f"{len(exported)} думи в {destination}")
     return exported
 
 
 def write_manifest(words: list[ExportedWord], style: Style, media: MediaInfo,
-                   destination: Path) -> None:
+                   destination: Path, fmt: str = "png",
+                   plate: tuple[int, int, int] | None = None) -> None:
     """Описанието: JSON за програми, CSV за човек с таблица."""
+    note = ("Всеки файл е в пълния размер на кадъра, тоест се внася както е "
+            "и ляга на мястото си. Времената са в секунди от началото на "
+            "видеото: start/end е докато думата стои на екрана, "
+            "spoken_start/spoken_end е кога се изрича.")
+    if plate is not None:
+        note += (" Фонът е плътен: слоевете се ползват един по един с "
+                 "хромакей, а не се наслагват — един върху друг ще се закрият.")
+
     data = {
         "style": style.name,
+        "format": fmt,
+        "background": ("#%02X%02X%02X" % plate) if plate else "прозрачен",
         "video": {"width": media.width, "height": media.height, "fps": media.fps},
-        "note": ("Всеки PNG е в пълния размер на кадъра, тоест се внася както е "
-                 "и ляга на мястото си. Времената са в секунди от началото на "
-                 "видеото: start/end е докато думата стои на екрана, "
-                 "spoken_start/spoken_end е кога се изрича."),
+        "note": note,
         "words": [word.to_json() for word in words],
     }
     (destination / "layers.json").write_text(

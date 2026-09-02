@@ -287,8 +287,8 @@ def layout_stack(
             placed.append(
                 Placed(
                     text=word.text,
-                    x=cursor,
-                    y=y,
+                    x=cursor + word.dx * video_h,
+                    y=y + word.dy * video_h,
                     size=line.size,
                     kind=block.kind_of(word_index),
                     start=word.start,
@@ -419,8 +419,8 @@ def layout_behind(
             placed.append(
                 Placed(
                     text=word.text,
-                    x=cursor,
-                    y=y_pos,
+                    x=cursor + word.dx * video_h,
+                    y=y_pos + word.dy * video_h,
                     size=word_size,
                     kind="normal",
                     start=word.start,
@@ -443,8 +443,8 @@ def layout_behind(
     placed.append(
         Placed(
             text=key_text,
-            x=key_x,
-            y=y,
+            x=key_x + key_word.dx * video_h,
+            y=y + key_word.dy * video_h,
             size=key_size,
             kind="highlight",
             start=key_word.start,

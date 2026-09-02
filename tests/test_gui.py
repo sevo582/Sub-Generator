@@ -151,3 +151,43 @@ def test_animations_are_the_ones_the_renderers_know():
 
     assert ANIMATIONS[0] == "няма"
     assert set(ANIMATIONS) == {"няма", "изскачане", "издигане", "избледняване"}
+
+
+# --------------------------------------------------------------------------
+# Местоположение на думата
+# --------------------------------------------------------------------------
+
+
+def test_nudge_moves_by_one_step():
+    from subs.gui import NUDGE_STEP, nudged
+
+    assert nudged(0.0, 0.0, 1, 0) == (pytest.approx(NUDGE_STEP), 0.0)
+    assert nudged(0.0, 0.0, 0, -1) == (0.0, pytest.approx(-NUDGE_STEP))
+
+
+def test_nudges_accumulate():
+    from subs.gui import NUDGE_STEP, nudged
+
+    dx, dy = 0.0, 0.0
+    for _ in range(3):
+        dx, dy = nudged(dx, dy, 1, 1)
+    assert dx == pytest.approx(3 * NUDGE_STEP)
+    assert dy == pytest.approx(3 * NUDGE_STEP)
+
+
+def test_offset_is_shown_in_pixels_of_the_current_video():
+    """Дробта е за да работи на всяка резолюция; човек мисли в пиксели."""
+    row = Row("а", 0, 1, dx=0.005, dy=-0.01)
+    assert row.values(1920)[7] == "+10, -19"
+    assert row.values(1280)[7] == "+6, -13"
+
+
+def test_no_offset_shows_a_dash():
+    assert Row("а", 0, 1).values(1920)[7] == "—"
+
+
+def test_offset_survives_the_table():
+    original = Transcript(words=[Word("а", 0, 1, dx=0.02, dy=-0.03)], language="bg")
+    restored = transcript_from_rows(rows_from_transcript(original), "bg")
+    assert restored.words[0].dx == pytest.approx(0.02)
+    assert restored.words[0].dy == pytest.approx(-0.03)
