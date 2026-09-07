@@ -160,7 +160,7 @@ class AssStackRenderer(Renderer):
         центъра. Котвата е една и съща за избледнялото и за плътното
         събитие — иначе думата подскача при смяната на състоянието.
         """
-        if word.animation == "изскачане":
+        if word.animation in ("изскачане", "блести"):
             centre_x = word.x + word.width / 2.0 + dx
             centre_y = word.y + size / 2.0 + dy
             return f"\\an5\\pos({centre_x:.1f},{centre_y:.1f})"
@@ -185,10 +185,14 @@ class AssStackRenderer(Renderer):
                     f"\\t(0,{fade_ms},\\alpha{ass_alpha(base)})")
 
         scale = ""
+        sparkle = ""
         if animate and word.animation == "изскачане":
             percent = round(style.pop_from * 100)
             scale = (f"\\fscx{percent}\\fscy{percent}"
                      f"\\t(0,{style.pop_ms},\\fscx100\\fscy100)")
+        elif animate and word.animation == "блести":
+            duration_ms = max(0, round((end - start) * 1000))
+            scale, sparkle = self._sparkle(style, colour, duration_ms)
 
         blur = shadow.blur * height
         shadow_tags = (
@@ -197,13 +201,43 @@ class AssStackRenderer(Renderer):
             f"{scale}{transition(opacity * shadow.alpha)}"
         )
         text_tags = (f"{self._placement(word, size, style, height, animate)}"
-                     f"{common}\\1c{colour}{scale}{transition(opacity)}")
+                     f"{common}\\1c{colour}{scale}{sparkle}{transition(opacity)}")
 
         stamp = f"{timestamp(start)},{timestamp(end)}"
         return [
             f"Dialogue: 0,{stamp},Base,,0,0,0,,{{{shadow_tags}}}{text}\n",
             f"Dialogue: 1,{stamp},Base,,0,0,0,,{{{text_tags}}}{text}\n",
         ]
+
+    @staticmethod
+    def _sparkle(style: StackStyle, colour: str, duration_ms: int) -> tuple[str, str]:
+        """Повтарящи се просветвания, докато думата стои плътна.
+
+        Връща два низа: мащабните ``\\t`` (отиват и в сянката, и в текста —
+        иначе двете се разминават на око) и цветовите (само в текста; сянката
+        пази собствения си цвят). Всяко трае ``sparkle_ms`` и е разделено по
+        средата: първата половина расте към ``sparkle_color``, втората се
+        връща — всички се пресмятат наведнъж по цялата продължителност на
+        думата, защото ASS няма вграден цикъл.
+        """
+        if duration_ms <= 0 or style.sparkle_ms <= 0:
+            return "", ""
+        bright = ass_colour(style.sparkle_color)
+        grow = round(style.sparkle_scale * 100)
+        half = max(1, style.sparkle_ms // 2)
+        scale_tags: list[str] = []
+        colour_tags: list[str] = []
+        t = 0
+        while t < duration_ms:
+            up_end = min(t + half, duration_ms)
+            scale_tags.append(f"\\t({t},{up_end},\\fscx{grow}\\fscy{grow})")
+            colour_tags.append(f"\\t({t},{up_end},\\1c{bright})")
+            down_end = min(t + style.sparkle_ms, duration_ms)
+            if down_end > up_end:
+                scale_tags.append(f"\\t({up_end},{down_end},\\fscx100\\fscy100)")
+                colour_tags.append(f"\\t({up_end},{down_end},\\1c{colour})")
+            t += style.sparkle_ms
+        return "".join(scale_tags), "".join(colour_tags)
 
     # ------------------------------------------------------------------
     # Рендиране

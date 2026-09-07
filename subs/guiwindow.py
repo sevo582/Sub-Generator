@@ -7,22 +7,23 @@
 
 from __future__ import annotations
 
+import math
 import tempfile
 import tkinter as tk
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, ttk
 from typing import Callable
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 from .burn import MediaInfo, decode_rgb_frames, probe
 from .export import BACKGROUNDS, FORMATS
 from .gui import (JSON_TYPES, LANGUAGES, MODELS, PALETTE, PREVIEW_FPS,
-                  PREVIEW_HEIGHT, PREVIEW_SECONDS, Row, VIDEO_TYPES, Worker,
-                  default_output, parse_time, preview_window, reveal,
-                  nudged, rows_from_transcript, stepped_scale, transcript_from_rows,
-                  validate)
-from .models import ANIMATIONS
+                  PREVIEW_HEIGHT, PREVIEW_SECONDS, SCALE_RANGE, Row,
+                  VIDEO_TYPES, Worker, default_output, nudged, parse_time,
+                  preview_window, reveal, rows_from_transcript, stepped_scale,
+                  transcript_from_rows, validate)
+from .models import ANIMATIONS, BlockLayout, Placed
 from .pipeline import build_blocks, export_layers, load_words, render, save_words
 from .styles import PRESETS, get_style
 from .transcribe import TranscribeOptions, transcribe
@@ -44,6 +45,16 @@ class App(tk.Tk):
         self.preview_image: ImageTk.PhotoImage | None = None
         self.editor: tk.Entry | None = None
 
+        #: Последният показан кадър (без рамка на думата) и разположението
+        #: на думите в него — за да можем да теглим рамка отгоре и да
+        #: превръщаме координати в прозореца обратно в пиксели от видеото.
+        self.preview_base: Image.Image | None = None
+        self.preview_path: Path | None = None
+        self.preview_layouts: list[BlockLayout] = []
+        self.preview_scale: float = 1.0
+        self.preview_offset: tuple[float, float] = (0.0, 0.0)
+        self._drag: dict | None = None
+
         self.video = tk.StringVar()
         self.style_name = tk.StringVar(value="stack")
         self.language = tk.StringVar(value="български")
@@ -51,6 +62,8 @@ class App(tk.Tk):
         self.preview_at = tk.StringVar(value="2.50")
         self.status = tk.StringVar(value="Избери видео, за да започнеш.")
         self.follow = tk.BooleanVar(value=True)
+        #: Прегледът в рамка на телефон — само външност, кадърът е същият.
+        self.phone = tk.BooleanVar(value=False)
         self.export_format = tk.StringVar(value=FORMATS[0])
         self.export_background = tk.StringVar(value=BACKGROUNDS[0])
 
@@ -139,6 +152,8 @@ class App(tk.Tk):
         # десният му край просто изчезва.
         second = ttk.Frame(left)
         second.pack(side="bottom", fill="x", pady=(2, 2))
+        bulk = ttk.Frame(left)
+        bulk.pack(side="bottom", fill="x", pady=(2, 0))
         tools = ttk.Frame(left)
         tools.pack(side="bottom", fill="x", pady=(4, 0))
         holder = ttk.Frame(left)
@@ -217,6 +232,20 @@ class App(tk.Tk):
         animations.bind("<<ComboboxSelected>>",
                         lambda _e: self._set_animation(self.animation.get()))
 
+        # За разлика от лентата по-горе (само избраната дума), тази винаги
+        # действа върху цялата транскрипция — независимо кой стил или модел
+        # е избран, цветът на всяка дума вече бие цвета по подразбиране.
+        ttk.Label(bulk, text="Цвят на всички думи:").pack(side="left", padx=(4, 2))
+        for colour in PALETTE:
+            swatch = tk.Button(bulk, background=colour, width=2, relief="ridge",
+                               borderwidth=1,
+                               command=lambda c=colour: self._set_color_all(c))
+            swatch.pack(side="left", padx=1)
+        ttk.Button(bulk, text="…", width=3,
+                   command=self._pick_color_all).pack(side="left", padx=(4, 2))
+        ttk.Button(bulk, text="Изчисти", width=8,
+                   command=lambda: self._set_color_all(None)).pack(side="left")
+
         right = ttk.LabelFrame(pane, text="Преглед", padding=4)
         pane.add(right, weight=4)
 
@@ -233,11 +262,25 @@ class App(tk.Tk):
         self.button_stop.pack(side="left", padx=2)
         ttk.Checkbutton(bar, text="следвай избора", variable=self.follow
                         ).pack(side="left", padx=(PAD, 0))
+        ttk.Checkbutton(bar, text="телефон", variable=self.phone,
+                        command=self._on_phone_toggle).pack(side="left", padx=(PAD, 0))
+
+        ttk.Label(right, foreground="#666",
+                 text="Избраната дума е с рамка и кръгчета в ъглите: тегли "
+                      "кръгче — сменя размера; тегли отвътре — мести думата; "
+                      "двоен клик — връща я по стил.").pack(fill="x", pady=(2, 0))
 
         self.canvas = tk.Label(right, background="#1c1c1c",
                                text="Тук се показва кадър от рендера.",
                                foreground="#888")
         self.canvas.pack(fill="both", expand=True, pady=(4, 0))
+        # Размерът и позицията на избраната дума се теглят направо върху
+        # кадъра — рамката с кръгчетата в ъглите показва къде може да се
+        # хване, без значение накъде теглиш.
+        self.canvas.bind("<ButtonPress-1>", self._on_preview_press)
+        self.canvas.bind("<B1-Motion>", self._on_preview_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_preview_release)
+        self.canvas.bind("<Double-Button-1>", self._on_preview_double_click)
 
     def _place_sash(self, pane: ttk.PanedWindow) -> None:
         try:
@@ -509,6 +552,9 @@ class App(tk.Tk):
         self.animation.set(row.animation)
         self.preview_at.set(format(row.middle, ".2f"))
         self.status.set(f"Дума {index + 1} от {len(self.rows)}: {row.text!r}")
+        # Рамката за дърпане на размера следва избора веднага — не чака
+        # следващия рендер, дори когато „следвай избора" е изключено.
+        self._render_preview_overlay()
 
         if self.follow_job is not None:
             self.after_cancel(self.follow_job)
@@ -545,6 +591,27 @@ class App(tk.Tk):
                                        title="Цвят на думата")[1]
         if chosen:
             self._set_color(chosen.upper())
+
+    def _apply_to_all(self, change) -> None:
+        if not self.rows:
+            messagebox.showinfo("Няма думи", "Първо транскрибирай или зареди JSON.")
+            return
+        for row in self.rows:
+            change(row)
+        for index in range(len(self.rows)):
+            self._refresh_row(index)
+        self._log_blocks()
+
+    def _set_color_all(self, colour: str | None) -> None:
+        def change(row: Row) -> None:
+            row.color = colour
+        self._apply_to_all(change)
+
+    def _pick_color_all(self) -> None:
+        chosen = colorchooser.askcolor(color="#FFFFFF",
+                                       title="Цвят на всички думи")[1]
+        if chosen:
+            self._set_color_all(chosen.upper())
 
     def _set_scale(self, value: float) -> None:
         def change(row: Row) -> None:
@@ -624,10 +691,14 @@ class App(tk.Tk):
         if not raw:
             self.log("прегледът излезе празен")
             return
-        self.play_frames = [
-            ImageTk.PhotoImage(Image.frombytes("RGB", (width, height), data))
-            for data in raw
-        ]
+        area = self._preview_area()
+        frames: list[ImageTk.PhotoImage] = []
+        for data in raw:
+            picture = Image.frombytes("RGB", (width, height), data)
+            if self.phone.get():
+                picture, _inset = self._phone_frame(picture, area)
+            frames.append(ImageTk.PhotoImage(picture))
+        self.play_frames = frames
         self.play_index = 0
         self.button_stop.configure(state="normal")
         self.log(f"{len(self.play_frames)} кадъра @ {fps:.0f} к/с")
@@ -805,7 +876,7 @@ class App(tk.Tk):
             return
 
         if what == "preview" and outputs:
-            self._show_preview(Path(outputs[0]))
+            self._show_preview(Path(outputs[0]), getattr(result, "layouts", []))
             self.status.set("Кадърът е готов.")
             return
         for path in outputs:
@@ -815,11 +886,254 @@ class App(tk.Tk):
             if messagebox.askyesno("Готово", "Да отворя ли папката?"):
                 reveal(Path(outputs[0]))
 
-    def _show_preview(self, path: Path) -> None:
-        image = Image.open(path)
-        area = (max(200, self.canvas.winfo_width() - 8),
+    #: Рамка на телефон: дебелина и заобляне в пиксели на екрана.
+    PHONE_BEZEL = 14
+    PHONE_RADIUS = 26
+
+    def _preview_area(self) -> tuple[int, int]:
+        return (max(200, self.canvas.winfo_width() - 8),
                 max(200, self.canvas.winfo_height() - 8))
-        image.thumbnail(area, Image.Resampling.LANCZOS)
-        self.preview_image = ImageTk.PhotoImage(image)
-        self.canvas.configure(image=self.preview_image, text="")
+
+    def _phone_frame(self, image: Image.Image,
+                     area: tuple[int, int]) -> tuple[Image.Image, tuple[int, int]]:
+        """Кадърът, сложен в проста рамка на телефон.
+
+        Връща и отместването на самото видео в готовата картинка — без него
+        рамката около думата би се разминала с думата, щом теглачката смята
+        в координати на видеото.
+        """
+        bezel, radius = self.PHONE_BEZEL, self.PHONE_RADIUS
+        shot = image.copy()
+        shot.thumbnail((max(60, area[0] - 2 * bezel), max(60, area[1] - 2 * bezel)),
+                       Image.Resampling.LANCZOS)
+
+        body = Image.new("RGB", (shot.width + 2 * bezel, shot.height + 2 * bezel),
+                        "#1c1c1c")
+        draw = ImageDraw.Draw(body)
+        draw.rounded_rectangle([0, 0, body.width - 1, body.height - 1], radius=radius,
+                               fill="#0b0b0b", outline="#3c3c3c", width=2)
+
+        # Заоблени ъгли и на екрана — иначе кадърът щръква от рамката.
+        mask = Image.new("L", shot.size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            [0, 0, shot.width - 1, shot.height - 1],
+            radius=max(4, radius - bezel), fill=255)
+        body.paste(shot, (bezel, bezel), mask)
+
+        # Изрезът горе и чертата долу — колкото да се познае, че е телефон.
+        centre = body.width // 2
+        notch_w, notch_h = max(40, shot.width // 4), max(8, bezel)
+        draw.rounded_rectangle([centre - notch_w // 2, bezel - 1,
+                                centre + notch_w // 2, bezel + notch_h],
+                               radius=notch_h // 2, fill="#0b0b0b")
+        bar_w = max(60, shot.width // 3)
+        bar_y = body.height - bezel - max(5, bezel // 2)
+        draw.rounded_rectangle([centre - bar_w // 2, bar_y, centre + bar_w // 2,
+                                bar_y + 3], radius=2, fill="#DDDDDD")
+        return body, (bezel, bezel)
+
+    def _show_preview(self, path: Path, layouts: list[BlockLayout] | None = None) -> None:
+        if layouts is not None:
+            self.preview_layouts = layouts
+        self.preview_path = path
+        image = Image.open(path).convert("RGB")
+        area = self._preview_area()
+        if self.phone.get():
+            frame, inset = self._phone_frame(image, area)
+            shot_width = frame.width - 2 * self.PHONE_BEZEL
+        else:
+            image.thumbnail(area, Image.Resampling.LANCZOS)
+            frame, inset, shot_width = image, (0, 0), image.width
+
+        self.preview_base = frame
+        self.preview_scale = (shot_width / self.media.width) if self.media else 1.0
+        self.preview_offset = (
+            (self.canvas.winfo_width() - frame.width) / 2.0 + inset[0],
+            (self.canvas.winfo_height() - frame.height) / 2.0 + inset[1],
+        )
+        self._render_preview_overlay()
         self.log(f"кадър: {path.name}")
+
+    def _on_phone_toggle(self) -> None:
+        """Само пречертава последния кадър — нов рендер не е нужен."""
+        if self.preview_path is not None and self.preview_path.exists():
+            self._show_preview(self.preview_path)
+
+    # ------------------------------------------------------------------
+    # Размер и място направо върху кадъра
+    # ------------------------------------------------------------------
+
+    def _selected_placed(self) -> Placed | None:
+        """Разположението на избраната дума в последния показан кадър.
+
+        Съвпада по тайминг с реда в таблицата — той е единственото общо
+        между ``Row`` и ``Placed``, а и се пази непроменен през рендера.
+        Връща None, ако думата не е била на екрана в този кадър — тогава
+        просто няма какво да се хване.
+        """
+        index = self._selected_index()
+        if index is None:
+            return None
+        row = self.rows[index]
+        for layout in self.preview_layouts:
+            for placed in layout.placed:
+                if (abs(placed.start - row.start) < 1e-6
+                        and abs(placed.end - row.end) < 1e-6):
+                    return placed
+        return None
+
+    def _placed_rect(self, placed: Placed) -> tuple[float, float, float, float]:
+        ox, oy = self.preview_offset
+        scale = self.preview_scale
+        x0 = ox + placed.x * scale
+        y0 = oy + placed.y * scale
+        x1 = ox + (placed.x + placed.width) * scale
+        y1 = oy + (placed.y + placed.height) * scale
+        return x0, y0, x1, y1
+
+    #: Радиус на кръгчето в ъгъла — и колкото се вижда, и колкото се хваща.
+    HANDLE_RADIUS = 5
+    HANDLE_GRAB = 10
+
+    @staticmethod
+    def _corners(rect: tuple[float, float, float, float]
+                 ) -> list[tuple[float, float]]:
+        x0, y0, x1, y1 = rect
+        return [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+
+    def _draw_overlay_rect(self, rect: tuple[float, float, float, float]) -> None:
+        if self.preview_base is None:
+            return
+        x0, y0, x1, y1 = rect
+        frame = self.preview_base.copy()
+        draw = ImageDraw.Draw(frame)
+        draw.rectangle([round(x0), round(y0), round(x1), round(y1)],
+                       outline="#0A84FF", width=2)
+        r = self.HANDLE_RADIUS
+        for cx, cy in self._corners(rect):
+            draw.ellipse([round(cx - r), round(cy - r), round(cx + r), round(cy + r)],
+                        fill="#0A84FF", outline="#FFFFFF", width=1)
+        self.preview_image = ImageTk.PhotoImage(frame)
+        self.canvas.configure(image=self.preview_image, text="")
+
+    def _render_preview_overlay(self) -> None:
+        if self.preview_base is None:
+            return
+        placed = self._selected_placed()
+        if placed is None:
+            self.preview_image = ImageTk.PhotoImage(self.preview_base)
+            self.canvas.configure(image=self.preview_image, text="")
+            return
+        self._draw_overlay_rect(self._placed_rect(placed))
+
+    def _on_preview_press(self, event: tk.Event) -> None:
+        placed = self._selected_placed()
+        index = self._selected_index()
+        if placed is None or index is None:
+            return
+        rect = self._placed_rect(placed)
+        x0, y0, x1, y1 = rect
+        row = self.rows[index]
+
+        # Ъглите се проверяват първо — там се хваща за смяна на размера.
+        for cx, cy in self._corners(rect):
+            if math.hypot(event.x - cx, event.y - cy) <= self.HANDLE_GRAB:
+                centre = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+                start_dist = max(6.0, math.hypot(cx - centre[0], cy - centre[1]))
+                self._drag = {
+                    "mode": "resize",
+                    "index": index,
+                    "rect": rect,
+                    "centre": centre,
+                    "start_dist": start_dist,
+                    "start_scale": row.scale,
+                }
+                return
+
+        margin = 6
+        if not (x0 - margin <= event.x <= x1 + margin
+                and y0 - margin <= event.y <= y1 + margin):
+            return  # кликът е извън думата — не пипаме нищо
+
+        # Навсякъде другаде вътре в думата — плъзгане накъдето пожелаеш.
+        self._drag = {
+            "mode": "move",
+            "index": index,
+            "rect": rect,
+            "start_x": event.x,
+            "start_y": event.y,
+            "start_dx": row.dx,
+            "start_dy": row.dy,
+        }
+
+    def _on_preview_drag(self, event: tk.Event) -> None:
+        drag = self._drag
+        if drag is None:
+            return
+        if drag["mode"] == "resize":
+            self._drag_resize(drag, event)
+        else:
+            self._drag_move(drag, event)
+
+    def _drag_resize(self, drag: dict, event: tk.Event) -> None:
+        cx, cy = drag["centre"]
+        dist = max(6.0, math.hypot(event.x - cx, event.y - cy))
+        ratio = dist / drag["start_dist"]
+        low, high = SCALE_RANGE
+        scale = min(high, max(low, round(drag["start_scale"] * ratio, 2)))
+        index = drag["index"]
+        if scale != self.rows[index].scale:
+            self.rows[index].scale = scale
+            self._refresh_row(index)
+
+        # Рамката расте/се смалява веднага около центъра си — истинският
+        # рендер идва едва след пускането на бутона (виж release-а).
+        grow = scale / drag["start_scale"]
+        x0, y0, x1, y1 = drag["rect"]
+        half_w = (x1 - x0) / 2.0 * grow
+        half_h = (y1 - y0) / 2.0 * grow
+        self._draw_overlay_rect((cx - half_w, cy - half_h, cx + half_w, cy + half_h))
+        self.status.set(f"Размер: {scale:.2f}×")
+
+    def _drag_move(self, drag: dict, event: tk.Event) -> None:
+        moved_x = event.x - drag["start_x"]
+        moved_y = event.y - drag["start_y"]
+        index = drag["index"]
+
+        # Отместването се пази като дроб от височината за двете оси — виж
+        # ``Word.dx``/``Word.dy`` — за да е стъпката еднаква нагоре-надолу
+        # и настрани, независимо от резолюцията.
+        if self.media and self.preview_scale > 0:
+            new_dx = drag["start_dx"] + moved_x / self.preview_scale / self.media.height
+            new_dy = drag["start_dy"] + moved_y / self.preview_scale / self.media.height
+            row = self.rows[index]
+            if (new_dx, new_dy) != (row.dx, row.dy):
+                row.dx, row.dy = new_dx, new_dy
+            self.status.set(f"Място: {new_dx * self.media.height:+.0f}, "
+                            f"{new_dy * self.media.height:+.0f} px")
+
+        x0, y0, x1, y1 = drag["rect"]
+        self._draw_overlay_rect((x0 + moved_x, y0 + moved_y, x1 + moved_x, y1 + moved_y))
+
+    def _on_preview_release(self, _event: tk.Event) -> None:
+        drag = self._drag
+        self._drag = None
+        if drag is None:
+            return
+        self._log_blocks()
+        # Реалният рендер идва след пускането на бутона — по време на самото
+        # плъзгане е достатъчна синята рамка, честото рендиране би бавило.
+        if not self.worker.busy:
+            self._preview()
+
+    def _on_preview_double_click(self, event: tk.Event) -> None:
+        """Двоен клик върху тялото на думата връща позицията ѝ по стил."""
+        placed = self._selected_placed()
+        index = self._selected_index()
+        if placed is None or index is None:
+            return
+        x0, y0, x1, y1 = self._placed_rect(placed)
+        if x0 <= event.x <= x1 and y0 <= event.y <= y1:
+            self._set_offset(0.0, 0.0)
+            if not self.worker.busy:
+                self._preview()

@@ -30,7 +30,7 @@ from ..burn import (LAYER_SUFFIX, MediaInfo, build_raster_command, ensure_parent
                     extract_frame, pipe_frames, verify_alpha)
 from ..layout import deoverlap, layout_behind
 from ..raster import (BBOX_MARGIN, Sprite, blur_shadow, composite, ease_out,
-                      entry_phase, hex_rgb)
+                      entry_phase, hex_rgb, sparkle_phase)
 from ..models import BlockLayout, Placed
 from ..styles import BehindStyle
 from ..textmetrics import font_path
@@ -62,6 +62,21 @@ class RasterBehindRenderer(Renderer):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _key_growth(word: Placed, style: BehindStyle, media: MediaInfo) -> float:
+        """Таван на растежа на ключовата дума, за да не изтече извън кадъра.
+
+        ``style.scale_end`` е дизайнерският таван, еднакъв за всяка дума, но
+        една дълга дума на него може да стане по-широка от самото видео.
+        Тук растежът се орязва до най-голямото, докъдето конкретната дума
+        (по нейната собствена ширина/височина) остава изцяло в кадъра.
+        """
+        if word.width <= 0 or word.height <= 0:
+            return style.scale_end
+        max_w = media.width / word.width
+        max_h = media.height / word.height
+        return max(1.0, min(style.scale_end, max_w, max_h))
+
+    @staticmethod
     def _bbox(layouts: list[BlockLayout], style: BehindStyle,
               media: MediaInfo) -> tuple[int, int, int, int]:
         """Правоъгълникът, в който изобщо може да се появи текст.
@@ -75,7 +90,8 @@ class RasterBehindRenderer(Renderer):
         rise = style.rise_by * media.height
         for layout in layouts:
             for word in layout.placed:
-                grow = style.scale_end if word.kind == "highlight" else 1.0
+                grow = (RasterBehindRenderer._key_growth(word, style, media)
+                        if word.kind == "highlight" else 1.0)
                 half_w = word.width * grow / 2.0
                 half_h = word.height * grow / 2.0
                 centre_x = word.x + word.width / 2.0
@@ -99,7 +115,8 @@ class RasterBehindRenderer(Renderer):
         height = min(media.height - top, (bottom - top + 1) // 2 * 2)
         return left, top, max(2, width), max(2, height)
 
-    def _sprites(self, layouts: list[BlockLayout], style: BehindStyle) -> dict[int, Sprite]:
+    def _sprites(self, layouts: list[BlockLayout], style: BehindStyle,
+                media: MediaInfo) -> dict[int, Sprite]:
         """Една маска на дума, в максималния ѝ размер."""
         key_path = font_path(style.font_key)
         plain_path = font_path(style.font_plain)
@@ -110,7 +127,8 @@ class RasterBehindRenderer(Renderer):
                 # Маската се рисува в най-големия размер, който думата ще
                 # достигне, и после само се смалява — така ръбовете остават
                 # чисти вместо да се раздуват от увеличаване.
-                size = word.size * (style.scale_end if is_key else 1.0)
+                grow = self._key_growth(word, style, media) if is_key else 1.0
+                size = word.size * grow
                 font = ImageFont.truetype(key_path if is_key else plain_path,
                                           max(1, round(size)))
                 skew = style.skew if is_key else 0.0
@@ -150,16 +168,21 @@ class RasterBehindRenderer(Renderer):
 
         if is_key:
             # Ключовата дума расте плавно през целия си живот на екрана —
-            # това е самата същност на стила, не входна анимация.
+            # това е самата същност на стила, не входна анимация. Растежът
+            # е орязан до тавана на тази конкретна дума, за да не изтича
+            # извън видеото (виж ``_key_growth``).
+            growth = self._key_growth(word, style, media)
             span = max(1e-6, word.hidden_after - word.visible_from)
             phase = ease_out((time - word.visible_from) / span)
-            scale = style.scale_start + (style.scale_end - style.scale_start) * phase
+            scale = style.scale_start + (growth - style.scale_start) * phase
         else:
+            growth = 1.0
             scale = 1.0
 
         # Входна анимация на отделната дума, върху горното.
         offset_y = 0.0
         alpha_factor = 1.0
+        sparkle_amount = 0.0
         if word.animation == "изскачане":
             phase = entry_phase(time, word.start, style.pop_ms)
             scale *= style.pop_from + (1.0 - style.pop_from) * phase
@@ -168,13 +191,18 @@ class RasterBehindRenderer(Renderer):
             offset_y = style.rise_by * media.height * (1.0 - phase)
         elif word.animation == "избледняване":
             alpha_factor = entry_phase(time, word.start, style.fade_in_ms)
+        elif word.animation == "блести":
+            # За разлика от горните три, това не спира — тупти докато думата
+            # стои на екрана.
+            sparkle_amount = sparkle_phase(time, word.start, style.sparkle_ms)
+            scale *= 1.0 + (style.sparkle_scale - 1.0) * sparkle_amount
 
         # Маската е нарисувана в максималния размер и се смалява до текущия.
-        reference = style.scale_end if is_key else 1.0
-        target = max(1, round(sprite.mask.width * scale / reference))
+        target = max(1, round(sprite.mask.width * scale / growth))
         mask = sprite.scaled(target)
 
-        # Центърът стои на място, растежът изтласква краищата извън кадъра.
+        # Центърът стои на място, думата расте около него — но не повече,
+        # отколкото ѝ е позволено от ``growth``, за да не излезе от кадъра.
         centre_x = word.x + word.width / 2.0
         centre_y = word.y + word.height / 2.0 + offset_y
         x = round(centre_x - mask.width / 2.0) - origin_x
@@ -183,6 +211,10 @@ class RasterBehindRenderer(Renderer):
         # Собственият цвят на думата бие цвета на стила.
         default = style.key_color if is_key else style.plain_color
         colour = hex_rgb(word.color or default)
+        if sparkle_amount:
+            bright = hex_rgb(style.sparkle_color)
+            colour = tuple(round(c + (b - c) * sparkle_amount)
+                           for c, b in zip(colour, bright))
         opacity = (style.key_alpha if is_key else style.plain_alpha) * alpha_factor
         shadow = style.shadow_key if is_key else style.shadow_plain
 
@@ -229,7 +261,7 @@ class RasterBehindRenderer(Renderer):
         """
         style = request.style.behind
         media = request.media
-        sprites = self._sprites(layouts, style)
+        sprites = self._sprites(layouts, style, media)
         result = RenderResult(layouts=layouts)
         layer_only = request.output is None
 
@@ -302,7 +334,7 @@ class RasterBehindRenderer(Renderer):
             if path is not None:
                 ensure_parent(path)
 
-        sprites = self._sprites(layouts, style)
+        sprites = self._sprites(layouts, style, media)
         rate = request.fps or media.fps
         total = (max(1, round(request.segment[1] * rate)) if request.segment
                  else media.frame_count)

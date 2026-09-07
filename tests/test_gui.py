@@ -150,7 +150,7 @@ def test_animations_are_the_ones_the_renderers_know():
     from subs.models import ANIMATIONS
 
     assert ANIMATIONS[0] == "няма"
-    assert set(ANIMATIONS) == {"няма", "изскачане", "издигане", "избледняване"}
+    assert set(ANIMATIONS) == {"няма", "изскачане", "издигане", "избледняване", "блести"}
 
 
 # --------------------------------------------------------------------------

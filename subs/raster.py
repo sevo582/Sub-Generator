@@ -43,6 +43,20 @@ def entry_phase(time: float, start: float, milliseconds: int) -> float:
     return ease_out((time - start) / (milliseconds / 1000.0))
 
 
+def sparkle_phase(time: float, start: float, period_ms: int) -> float:
+    """Триъгълна вълна 0 → 1 → 0, която тупти на всеки ``period_ms``.
+
+    За разлика от ``entry_phase`` не спира при 1 — продължава да пулсира,
+    докато думата е на екрана. Преди ``start`` връща 0: думата стои спокойно,
+    докато не ѝ дойде редът, също като входните анимации.
+    """
+    if period_ms <= 0 or time < start:
+        return 0.0
+    period = period_ms / 1000.0
+    phase = ((time - start) % period) / period
+    return 1.0 - abs(2.0 * phase - 1.0)
+
+
 class Sprite:
     """Маската на една дума, нарисувана веднъж и преоразмерявана после.
 

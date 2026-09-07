@@ -346,3 +346,60 @@ def test_words_without_settings_stay_neutral(style):
     block.highlight = 0
     layout = layout_stack(block, style.stack, measurer(style.stack.font), WIDTH, HEIGHT)
     assert all(p.color is None and p.animation == "няма" for p in layout.placed)
+
+
+# --------------------------------------------------------------------------
+# Ръчно отместване (плъзгане в прегледа)
+# --------------------------------------------------------------------------
+
+
+def test_stack_word_offset_shifts_the_placed_position(style):
+    block = Block(words("едно две три четири"))
+    block.words[1].dx = 0.05
+    block.words[1].dy = -0.02
+    block.highlight = 0
+    without = layout_stack(block, style.stack, measurer(style.stack.font), WIDTH, HEIGHT)
+
+    block.words[1].dx = 0.0
+    block.words[1].dy = 0.0
+    baseline = layout_stack(block, style.stack, measurer(style.stack.font), WIDTH, HEIGHT)
+
+    assert without.placed[1].x == pytest.approx(baseline.placed[1].x + 0.05 * HEIGHT)
+    assert without.placed[1].y == pytest.approx(baseline.placed[1].y - 0.02 * HEIGHT)
+    # Другите думи не се местят заради чужд офсет.
+    assert without.placed[0].x == pytest.approx(baseline.placed[0].x)
+
+
+def test_behind_key_word_offset_shifts_the_placed_position():
+    style = get_style("behind")
+    block = Block(words("това голф игрище"))
+    block.highlight = 2
+    baseline = layout_behind(block, style.behind, measurer(style.behind.font_key),
+                             measurer(style.behind.font_plain), WIDTH, HEIGHT)
+
+    block.words[2].dx = 0.1
+    block.words[2].dy = 0.03
+    moved = layout_behind(block, style.behind, measurer(style.behind.font_key),
+                          measurer(style.behind.font_plain), WIDTH, HEIGHT)
+
+    base_key = next(p for p in baseline.placed if p.kind == "highlight")
+    moved_key = next(p for p in moved.placed if p.kind == "highlight")
+    assert moved_key.x == pytest.approx(base_key.x + 0.1 * HEIGHT)
+    assert moved_key.y == pytest.approx(base_key.y + 0.03 * HEIGHT)
+
+
+def test_behind_plain_word_offset_shifts_the_placed_position():
+    style = get_style("behind")
+    block = Block(words("това голф игрище пътува"))
+    block.highlight = 2
+    block.words[0].dx = -0.08
+
+    layout = layout_behind(block, style.behind, measurer(style.behind.font_key),
+                           measurer(style.behind.font_plain), WIDTH, HEIGHT)
+    baseline = layout_behind(Block(words("това голф игрище пътува"), highlight=2),
+                             style.behind, measurer(style.behind.font_key),
+                             measurer(style.behind.font_plain), WIDTH, HEIGHT)
+
+    moved = next(p for p in layout.placed if p.text == "това")
+    original = next(p for p in baseline.placed if p.text == "това")
+    assert moved.x == pytest.approx(original.x - 0.08 * HEIGHT)
